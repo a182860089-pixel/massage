@@ -959,6 +959,1222 @@
     }
   };
 
+  // ==================== 上下文 JSON 导出器 ====================
+  const ContextExporter = {
+    // 分片配置
+    CHUNK_CONFIG: {
+      MAX_TOKENS_PER_CHUNK: 80000,  // 每个分片最大 80k tokens（留 buffer 给 AI 响应）
+      TOKENS_PER_CHAR: 0.75,        // 中文约 0.75 token/字符
+      MAX_MESSAGES_PER_CHUNK: 25    // 或者按消息数分（25条）
+    },
+
+    // 将 HTML 内容转换为纯文本 + 保留代码块
+    htmlToPlainText(html) {
+      const tempDiv = document.createElement('div');
+      tempDiv.innerHTML = html;
+      
+      // 处理代码块：保留 ```language 格式
+      tempDiv.querySelectorAll('pre code').forEach(codeEl => {
+        const pre = codeEl.closest('pre');
+        if (pre) {
+          let language = '';
+          const langClass = Array.from(codeEl.classList).find(c => c.startsWith('language-'));
+          if (langClass) language = langClass.replace('language-', '');
+          const codeText = codeEl.textContent;
+          pre.textContent = '```' + language + '\n' + codeText + '\n```';
+        }
+      });
+      
+      // 处理行内代码
+      tempDiv.querySelectorAll('code').forEach(codeEl => {
+        if (!codeEl.closest('pre')) {
+          codeEl.textContent = '`' + codeEl.textContent + '`';
+        }
+      });
+      
+      // 移除按钮等非内容元素
+      tempDiv.querySelectorAll('button, svg, [class*="copy"]').forEach(el => el.remove());
+      
+      return tempDiv.textContent.trim();
+    },
+
+    // 估算 tokens 数量
+    estimateTokens(text) {
+      if (!text) return 0;
+      // 粗略估算：中文约 0.75 token/字符，英文约 0.25 token/字符
+      const chineseChars = (text.match(/[\u4e00-\u9fa5]/g) || []).length;
+      const otherChars = text.length - chineseChars;
+      return Math.ceil(chineseChars / this.CHUNK_CONFIG.TOKENS_PER_CHAR + otherChars * 0.25);
+    },
+
+    // 提取对话上下文（带消息处理）
+    extractContext(conversation) {
+      const messages = conversation.messages.map((msg, index) => {
+        const content = this.htmlToPlainText(msg.content);
+        return {
+          index: index + 1,
+          role: msg.role,
+          content: content,
+          tokens: this.estimateTokens(content)
+        };
+      });
+
+      const totalTokens = messages.reduce((sum, m) => sum + m.tokens, 0);
+
+      return {
+        version: '2.0',  // 升级版本号，支持分片
+        title: conversation.title,
+        url: conversation.url,
+        exportedAt: new Date().toISOString(),
+        messageCount: messages.length,
+        totalTokens: totalTokens,
+        workspace: Parser.getWorkspaceName(),
+        messages: messages
+      };
+    },
+
+    // 智能分片：按 token 数量分割消息
+    splitIntoChunks(contextData) {
+      const { MAX_TOKENS_PER_CHUNK, MAX_MESSAGES_PER_CHUNK } = this.CHUNK_CONFIG;
+      const messages = contextData.messages;
+      const chunks = [];
+      
+      let currentChunk = [];
+      let currentTokens = 0;
+      
+      for (const msg of messages) {
+        const msgTokens = msg.tokens || this.estimateTokens(msg.content);
+        
+        // 如果单条消息超过限制，强制作为单独一个分片
+        if (msgTokens > MAX_TOKENS_PER_CHUNK) {
+          // 先保存当前分片
+          if (currentChunk.length > 0) {
+            chunks.push({ messages: currentChunk, tokens: currentTokens });
+            currentChunk = [];
+            currentTokens = 0;
+          }
+          // 单独保存超长消息
+          chunks.push({ messages: [msg], tokens: msgTokens });
+          continue;
+        }
+        
+        // 检查是否需要开始新分片
+        const wouldExceedTokens = currentTokens + msgTokens > MAX_TOKENS_PER_CHUNK;
+        const wouldExceedMessages = currentChunk.length >= MAX_MESSAGES_PER_CHUNK;
+        
+        if (wouldExceedTokens || wouldExceedMessages) {
+          if (currentChunk.length > 0) {
+            chunks.push({ messages: currentChunk, tokens: currentTokens });
+          }
+          currentChunk = [msg];
+          currentTokens = msgTokens;
+        } else {
+          currentChunk.push(msg);
+          currentTokens += msgTokens;
+        }
+      }
+      
+      // 保存最后一个分片
+      if (currentChunk.length > 0) {
+        chunks.push({ messages: currentChunk, tokens: currentTokens });
+      }
+      
+      return chunks;
+    },
+
+    // 创建分片文件的数据结构
+    createChunkData(contextData, chunkMessages, chunkIndex, totalChunks) {
+      const startIndex = chunkMessages[0].index;
+      const endIndex = chunkMessages[chunkMessages.length - 1].index;
+      const chunkTokens = chunkMessages.reduce((sum, m) => sum + (m.tokens || 0), 0);
+      
+      return {
+        version: '2.0',
+        type: 'chunk',  // 标记为分片
+        title: contextData.title,
+        url: contextData.url,
+        exportedAt: contextData.exportedAt,
+        workspace: contextData.workspace,
+        // 分片信息
+        chunk: {
+          index: chunkIndex,           // 当前是第几个分片（从1开始）
+          total: totalChunks,          // 总共几个分片
+          messageRange: `${startIndex}-${endIndex}`,  // 消息范围
+          messageCount: chunkMessages.length,
+          tokens: chunkTokens
+        },
+        // 总体信息
+        original: {
+          totalMessages: contextData.messageCount,
+          totalTokens: contextData.totalTokens
+        },
+        // 消息内容（移除 tokens 字段，减少文件大小）
+        messages: chunkMessages.map(m => ({
+          index: m.index,
+          role: m.role,
+          content: m.content
+        }))
+      };
+    },
+
+    // 生成 JSON 字符串
+    toJSON(contextData) {
+      return JSON.stringify(contextData, null, 2);
+    },
+
+    // 导出为 JSON 文件（支持智能分片）
+    async export() {
+      const conversation = Parser.parseConversation();
+      if (!conversation.messages.length) {
+        alert('没有找到可导出的对话内容');
+        return null;
+      }
+
+      const contextData = this.extractContext(conversation);
+      const workspaceName = Parser.getWorkspaceName();
+      const safeWorkspace = Utils.sanitizeFileName(workspaceName || '个人帐户');
+      const safeTitle = Utils.sanitizeFileName(conversation.title);
+      
+      // 检查是否需要分片
+      const { MAX_TOKENS_PER_CHUNK } = this.CHUNK_CONFIG;
+      const needsChunking = contextData.totalTokens > MAX_TOKENS_PER_CHUNK || contextData.messageCount > 25;
+      
+      if (needsChunking) {
+        return await this.exportChunked(contextData, safeWorkspace, safeTitle);
+      } else {
+        return await this.exportSingle(contextData, safeWorkspace, safeTitle);
+      }
+    },
+
+    // 导出单个文件（短对话）
+    async exportSingle(contextData, safeWorkspace, safeTitle) {
+      // 移除 tokens 字段减少文件大小
+      const cleanData = {
+        ...contextData,
+        type: 'single',  // 标记为单文件
+        messages: contextData.messages.map(m => ({
+          index: m.index,
+          role: m.role,
+          content: m.content
+        }))
+      };
+      
+      const jsonStr = this.toJSON(cleanData);
+      const filename = `${safeTitle}.json`;
+      
+      if (CONFIG.saveMode === 'folder' && savedFolderHandle) {
+        try {
+          const workspaceFolder = await Utils.getOrCreateFolder(savedFolderHandle, safeWorkspace);
+          const conversationFolder = await Utils.getOrCreateFolder(workspaceFolder, safeTitle);
+          const contextFolder = await Utils.getOrCreateFolder(conversationFolder, 'context');
+          
+          await Utils.saveToFolder(contextFolder, filename, jsonStr, 'application/json');
+          
+          UI.showToast(`✅ 上下文已保存 (${contextData.messageCount}条消息, ~${Math.round(contextData.totalTokens/1000)}k tokens)`, 'success', 3000);
+          console.log(`[ChatGPT Saver] 上下文 JSON 已保存: ${safeWorkspace}/${safeTitle}/context/${filename}`);
+          
+          return { contextData: cleanData, filename, chunked: false };
+        } catch (e) {
+          console.error('[ChatGPT Saver] 保存上下文 JSON 失败:', e);
+        }
+      }
+      
+      // 降级到浏览器下载
+      const downloadFilename = `context_${safeTitle}_${Utils.getTimestamp()}.json`;
+      Utils.downloadFile(jsonStr, downloadFilename, 'application/json');
+      UI.showToast('✅ 上下文 JSON 已下载', 'success', 3000);
+      
+      return { contextData: cleanData, filename: downloadFilename, chunked: false };
+    },
+
+    // 导出分片文件（长对话）
+    async exportChunked(contextData, safeWorkspace, safeTitle) {
+      const chunks = this.splitIntoChunks(contextData);
+      const totalChunks = chunks.length;
+      
+      console.log(`[ChatGPT Saver] 对话将分成 ${totalChunks} 个分片导出`);
+      console.log(`[ChatGPT Saver] 总消息数: ${contextData.messageCount}, 总 tokens: ~${contextData.totalTokens}`);
+      
+      const savedFiles = [];
+      
+      if (CONFIG.saveMode === 'folder' && savedFolderHandle) {
+        try {
+          const workspaceFolder = await Utils.getOrCreateFolder(savedFolderHandle, safeWorkspace);
+          const conversationFolder = await Utils.getOrCreateFolder(workspaceFolder, safeTitle);
+          const contextFolder = await Utils.getOrCreateFolder(conversationFolder, 'context');
+          
+          // 保存每个分片
+          for (let i = 0; i < totalChunks; i++) {
+            const chunkData = this.createChunkData(contextData, chunks[i].messages, i + 1, totalChunks);
+            const filename = `${safeTitle}_part${String(i + 1).padStart(2, '0')}_of_${String(totalChunks).padStart(2, '0')}.json`;
+            const jsonStr = this.toJSON(chunkData);
+            
+            await Utils.saveToFolder(contextFolder, filename, jsonStr, 'application/json');
+            savedFiles.push(filename);
+            
+            console.log(`[ChatGPT Saver] 分片 ${i + 1}/${totalChunks} 已保存: ${filename}`);
+          }
+          
+          // 创建索引文件
+          const indexData = {
+            version: '2.0',
+            type: 'index',
+            title: contextData.title,
+            url: contextData.url,
+            exportedAt: contextData.exportedAt,
+            workspace: contextData.workspace,
+            totalMessages: contextData.messageCount,
+            totalTokens: contextData.totalTokens,
+            chunks: chunks.map((chunk, i) => ({
+              index: i + 1,
+              filename: `${safeTitle}_part${String(i + 1).padStart(2, '0')}_of_${String(totalChunks).padStart(2, '0')}.json`,
+              messageRange: `${chunk.messages[0].index}-${chunk.messages[chunk.messages.length - 1].index}`,
+              messageCount: chunk.messages.length,
+              tokens: chunk.tokens
+            })),
+            instructions: {
+              zh: `此对话已分成 ${totalChunks} 个文件。请将所有 part*.json 文件上传到 ChatGPT Projects，AI 会自动索引并检索相关内容。`,
+              en: `This conversation is split into ${totalChunks} files. Upload all part*.json files to ChatGPT Projects for automatic indexing.`
+            }
+          };
+          
+          await Utils.saveToFolder(contextFolder, `_index.json`, this.toJSON(indexData), 'application/json');
+          
+          UI.showToast(`✅ 已分成 ${totalChunks} 个文件保存 (共 ${contextData.messageCount} 条消息)\n💡 建议上传到 ChatGPT Projects 使用`, 'success', 5000);
+          
+          return { 
+            contextData, 
+            files: savedFiles, 
+            indexFile: '_index.json',
+            chunked: true, 
+            totalChunks 
+          };
+        } catch (e) {
+          console.error('[ChatGPT Saver] 保存分片文件失败:', e);
+        }
+      }
+      
+      // 降级到浏览器下载：打包成 zip 或者逐个下载
+      // 简化处理：提示用户使用文件夹保存模式
+      alert(`对话内容较长（${contextData.messageCount}条消息, ~${Math.round(contextData.totalTokens/1000)}k tokens），需要分成 ${totalChunks} 个文件。\n\n请先点击"选择文件夹"设置保存位置，然后重新导出。`);
+      return null;
+    }
+  };
+
+  // ==================== 上下文导入器 ====================
+  const ContextImporter = {
+    importModal: null,
+    currentContextData: null,
+    currentFileInfo: null,  // 当前选中的文件信息
+    fileInput: null,
+    availableContextFiles: [], // 可用的上下文文件列表
+
+    // 创建导入弹窗
+    createImportModal() {
+      if (this.importModal) return;
+      
+      const modal = document.createElement('div');
+      modal.className = 'saver-import-modal';
+      modal.id = 'saver-import-modal';
+      modal.innerHTML = `
+        <div class="saver-import-dialog">
+          <div class="saver-import-header">
+            <h3>📥 导入上下文</h3>
+            <p>将之前的对话上下文导入到新对话中</p>
+          </div>
+          <div class="saver-import-content">
+            <!-- 文件列表区域 -->
+            <div id="saver-file-list-area" style="display: none;">
+              <div style="font-size: 12px; color: var(--saver-text); opacity: 0.8; margin-bottom: 8px;">📂 从保存文件夹中选择：</div>
+              <div id="saver-file-list" style="max-height: 200px; overflow-y: auto; border: 1px solid var(--saver-border); border-radius: 8px;"></div>
+            </div>
+            
+            <!-- 预览区域 -->
+            <div class="saver-import-preview" id="saver-import-preview">
+              正在扫描文件夹...
+            </div>
+            <div class="saver-import-meta" id="saver-import-meta" style="display: none;">
+              <div class="saver-import-meta-item">
+                <span class="saver-import-meta-label">对话标题</span>
+                <span class="saver-import-meta-value" id="saver-meta-title">-</span>
+              </div>
+              <div class="saver-import-meta-item">
+                <span class="saver-import-meta-label">消息数量</span>
+                <span class="saver-import-meta-value" id="saver-meta-count">-</span>
+              </div>
+              <div class="saver-import-meta-item">
+                <span class="saver-import-meta-label">导出时间</span>
+                <span class="saver-import-meta-value" id="saver-meta-time">-</span>
+              </div>
+            </div>
+            <div class="saver-import-options" id="saver-import-options" style="display: none;">
+              <label>
+                <input type="checkbox" id="saver-auto-send" />
+                <span>导入后自动发送</span>
+              </label>
+            </div>
+          </div>
+          <div class="saver-import-footer">
+            <button class="saver-import-btn secondary" id="saver-import-cancel">取消</button>
+            <button class="saver-import-btn secondary" id="saver-import-select">从本地选择</button>
+            <button class="saver-import-btn primary" id="saver-import-confirm" disabled>导入</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(modal);
+      this.importModal = modal;
+      
+      // 绑定事件
+      modal.querySelector('#saver-import-cancel').onclick = () => this.hideModal();
+      modal.querySelector('#saver-import-select').onclick = () => this.selectLocalFile();
+      modal.querySelector('#saver-import-confirm').onclick = () => this.confirmImport();
+      modal.onclick = (e) => {
+        if (e.target === modal) this.hideModal();
+      };
+      
+      // 创建隐藏的文件选择器
+      this.createFileInput();
+    },
+
+    // 创建隐藏的文件输入
+    createFileInput() {
+      if (this.fileInput) return;
+      
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.id = 'saver-file-input';
+      input.accept = '.json,application/json';
+      input.onchange = (e) => this.handleLocalFileSelect(e);
+      document.body.appendChild(input);
+      this.fileInput = input;
+    },
+
+    // 从本地选择文件（系统文件选择器）
+    selectLocalFile() {
+      if (this.fileInput) {
+        this.fileInput.click();
+      }
+    },
+
+    // 处理本地文件选择
+    async handleLocalFileSelect(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+      
+      try {
+        const text = await file.text();
+        const data = JSON.parse(text);
+        
+        // 验证 JSON 结构
+        if (!data.messages || !Array.isArray(data.messages)) {
+          throw new Error('无效的上下文 JSON 格式');
+        }
+        
+        this.currentContextData = data;
+        this.showContentPreview(data);
+        
+      } catch (e) {
+        alert('解析 JSON 文件失败: ' + e.message);
+        console.error('[ChatGPT Saver] JSON 解析错误:', e);
+      }
+      
+      event.target.value = '';
+    },
+
+    // 扫描保存文件夹中的所有上下文 JSON 文件
+    async scanContextFiles() {
+      if (!savedFolderHandle) {
+        return [];
+      }
+      
+      const files = [];
+      
+      try {
+        // 遍历工作空间文件夹
+        for await (const workspaceEntry of savedFolderHandle.values()) {
+          if (workspaceEntry.kind !== 'directory') continue;
+          
+          const workspaceName = workspaceEntry.name;
+          const workspaceHandle = await savedFolderHandle.getDirectoryHandle(workspaceName);
+          
+          // 遍历对话文件夹
+          for await (const convEntry of workspaceHandle.values()) {
+            if (convEntry.kind !== 'directory') continue;
+            
+            const convName = convEntry.name;
+            const convHandle = await workspaceHandle.getDirectoryHandle(convName);
+            
+            // 检查是否有 context 文件夹
+            try {
+              const contextFolder = await convHandle.getDirectoryHandle('context', { create: false });
+              
+              // 遍历 context 文件夹中的 JSON 文件
+              for await (const fileEntry of contextFolder.values()) {
+                if (fileEntry.kind === 'file' && fileEntry.name.endsWith('.json')) {
+                  files.push({
+                    workspace: workspaceName,
+                    conversation: convName,
+                    filename: fileEntry.name,
+                    path: `${workspaceName}/${convName}/context/${fileEntry.name}`,
+                    handle: fileEntry
+                  });
+                }
+              }
+            } catch (e) {
+              // 没有 context 文件夹，跳过
+            }
+          }
+        }
+      } catch (e) {
+        console.error('[ChatGPT Saver] 扫描文件夹失败:', e);
+      }
+      
+      // 按路径排序
+      files.sort((a, b) => a.path.localeCompare(b.path));
+      
+      return files;
+    },
+
+    // 显示文件列表（树形结构）
+    renderFileList(files) {
+      const listArea = document.getElementById('saver-file-list-area');
+      const listEl = document.getElementById('saver-file-list');
+      const previewEl = document.getElementById('saver-import-preview');
+      
+      if (files.length === 0) {
+        listArea.style.display = 'none';
+        previewEl.textContent = '文件夹中没有找到上下文文件\n\n请先导出一些对话上下文，或点击"从本地选择"按钮选择文件';
+        return;
+      }
+      
+      listArea.style.display = 'block';
+      previewEl.textContent = '请从上方列表中选择一个文件';
+      
+      // 构建树形结构
+      const tree = this.buildFileTree(files);
+      
+      // 渲染树形结构
+      listEl.innerHTML = this.renderTree(tree);
+      
+      // 绑定事件
+      this.bindTreeEvents(listEl, files);
+    },
+    
+    // 构建文件树结构
+    buildFileTree(files) {
+      const tree = {};
+      
+      for (const file of files) {
+        if (!tree[file.workspace]) {
+          tree[file.workspace] = {};
+        }
+        if (!tree[file.workspace][file.conversation]) {
+          tree[file.workspace][file.conversation] = [];
+        }
+        tree[file.workspace][file.conversation].push(file);
+      }
+      
+      return tree;
+    },
+    
+    // 渲染树形结构 HTML
+    renderTree(tree) {
+      let html = '';
+      
+      for (const workspace of Object.keys(tree).sort()) {
+        html += `
+          <div class="saver-tree-workspace" data-workspace="${workspace}">
+            <div class="saver-tree-folder" style="
+              padding: 8px 12px; cursor: pointer; font-weight: 600;
+              color: var(--saver-text); display: flex; align-items: center; gap: 8px;
+              border-bottom: 1px solid var(--saver-border);
+            ">
+              <span class="saver-tree-icon">📁</span>
+              <span>${workspace}</span>
+              <span style="margin-left: auto; font-size: 11px; color: #888;">工作空间</span>
+            </div>
+            <div class="saver-tree-children" style="display: none; padding-left: 16px;">
+        `;
+        
+        for (const conversation of Object.keys(tree[workspace]).sort()) {
+          const convFiles = tree[workspace][conversation];
+          html += `
+            <div class="saver-tree-conversation" data-conversation="${conversation}">
+              <div class="saver-tree-folder" style="
+                padding: 6px 12px; cursor: pointer; font-weight: 500;
+                color: var(--saver-text); display: flex; align-items: center; gap: 8px;
+                border-bottom: 1px solid var(--saver-border); font-size: 13px;
+              ">
+                <span class="saver-tree-icon">📁</span>
+                <span>${conversation}</span>
+                <span style="margin-left: auto; font-size: 10px; color: #888;">${convFiles.length} 个文件</span>
+              </div>
+              <div class="saver-tree-children" style="display: none; padding-left: 16px;">
+          `;
+          
+          for (const file of convFiles) {
+            const isChunk = file.filename.includes('_part');
+            const isIndex = file.filename === '_index.json';
+            const icon = isIndex ? '📊' : (isChunk ? '📦' : '📄');
+            // 使用 file.path 作为唯一标识符（已经在 scanContextFiles 中生成）
+            html += `
+              <div class="saver-tree-file" data-file-path="${file.path}" style="
+                padding: 6px 12px; cursor: pointer; font-size: 12px;
+                color: var(--saver-text); display: flex; align-items: center; gap: 8px;
+                border-bottom: 1px solid var(--saver-border); transition: background 0.2s;
+              ">
+                <span>${icon}</span>
+                <span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${file.filename}</span>
+              </div>
+            `;
+          }
+          
+          html += `
+              </div>
+            </div>
+          `;
+        }
+        
+        html += `
+            </div>
+          </div>
+        `;
+      }
+      
+      return html;
+    },
+    
+    // 绑定树形结构事件
+    bindTreeEvents(listEl, files) {
+      // 创建文件映射：path -> file（使用 file.path 作为唯一标识）
+      const fileMap = {};
+      for (const file of files) {
+        fileMap[file.path] = file;
+        console.log('[ChatGPT Saver] 映射文件:', file.path);
+      }
+      
+      // 文件夹展开/收起
+      listEl.querySelectorAll('.saver-tree-folder').forEach(folder => {
+        folder.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const children = folder.nextElementSibling;
+          const icon = folder.querySelector('.saver-tree-icon');
+          if (children && children.classList.contains('saver-tree-children')) {
+            const isOpen = children.style.display !== 'none';
+            children.style.display = isOpen ? 'none' : 'block';
+            icon.textContent = isOpen ? '📁' : '📂';
+          }
+        });
+        
+        // 鼠标悬停效果
+        folder.addEventListener('mouseenter', () => {
+          folder.style.background = 'var(--saver-format-active-bg)';
+        });
+        folder.addEventListener('mouseleave', () => {
+          folder.style.background = 'transparent';
+        });
+      });
+      
+      // 文件点击
+      listEl.querySelectorAll('.saver-tree-file').forEach(fileEl => {
+        fileEl.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const filePath = fileEl.dataset.filePath;
+          const file = fileMap[filePath];
+          
+          if (!file) {
+            console.error('[ChatGPT Saver] 找不到文件:', filePath);
+            console.error('[ChatGPT Saver] 可用的 keys:', Object.keys(fileMap));
+            return;
+          }
+          
+          console.log('[ChatGPT Saver] 加载文件:', file.filename, '路径:', filePath);
+          await this.loadContextFile(file);
+          
+          // 高亮选中项
+          listEl.querySelectorAll('.saver-tree-file').forEach(el => {
+            el.classList.remove('selected');
+            el.style.background = 'transparent';
+            el.style.borderLeft = 'none';
+          });
+          fileEl.classList.add('selected');
+          fileEl.style.background = 'var(--saver-format-active-bg)';
+          fileEl.style.borderLeft = '3px solid #10a37f';
+        });
+        
+        // 鼠标悬停效果
+        fileEl.addEventListener('mouseenter', function() {
+          if (!this.classList.contains('selected')) {
+            this.style.background = 'var(--saver-format-active-bg)';
+          }
+        });
+        fileEl.addEventListener('mouseleave', function() {
+          if (!this.classList.contains('selected')) {
+            this.style.background = 'transparent';
+          }
+        });
+      });
+    },
+
+    // 加载上下文文件
+    async loadContextFile(fileInfo) {
+      try {
+        const file = await fileInfo.handle.getFile();
+        const text = await file.text();
+        const data = JSON.parse(text);
+        
+        // 检查是否是索引文件
+        if (data.type === 'index') {
+          this.showChunkedInfo(data, fileInfo);
+          return;
+        }
+        
+        // 检查是否是分片文件
+        if (data.type === 'chunk') {
+          this.showChunkWarning(data, fileInfo);
+          return;
+        }
+        
+        // 普通单文件
+        if (!data.messages || !Array.isArray(data.messages)) {
+          throw new Error('无效的上下文 JSON 格式');
+        }
+        
+        this.currentContextData = data;
+        this.currentFileInfo = fileInfo;  // 保存文件信息，用于文件上传
+        this.showContentPreview(data);
+        
+      } catch (e) {
+        alert('读取文件失败: ' + e.message);
+        console.error('[ChatGPT Saver] 读取上下文文件失败:', e);
+      }
+    },
+
+    // 显示分片信息（索引文件）
+    showChunkedInfo(indexData, fileInfo) {
+      const previewEl = document.getElementById('saver-import-preview');
+      const metaEl = document.getElementById('saver-import-meta');
+      const optionsEl = document.getElementById('saver-import-options');
+      const confirmBtn = document.getElementById('saver-import-confirm');
+      
+      // 显示分片信息
+      const chunksList = indexData.chunks.map(c => 
+        `  ${c.index}. ${c.filename}\n     消息 ${c.messageRange} (共 ${c.messageCount} 条, ~${Math.round(c.tokens/1000)}k tokens)`
+      ).join('\n\n');
+      
+      previewEl.textContent = `📦 检测到分片导出（共 ${indexData.chunks.length} 个文件）\n\n总消息数：${indexData.totalMessages} 条\n总 tokens：~${Math.round(indexData.totalTokens/1000)}k\n\n分片列表：\n${chunksList}\n\n💡 建议使用方法：\n1. 在 ChatGPT 点击右上角头像 -> Projects\n2. 创建新 Project 或选择现有 Project\n3. 将所有 part*.json 文件上传到 Project\n4. AI 会自动索引并检索相关内容\n\n⚠️ 不建议通过文本注入导入，因为总内容超过了 ChatGPT 上下文窗口限制。`;
+      
+      metaEl.style.display = 'none';
+      optionsEl.style.display = 'none';
+      confirmBtn.disabled = true;
+    },
+
+    // 显示分片警告（单个分片文件）- 自动查找同组所有分片
+    async showChunkWarning(chunkData, fileInfo) {
+      const previewEl = document.getElementById('saver-import-preview');
+      const metaEl = document.getElementById('saver-import-meta');
+      const optionsEl = document.getElementById('saver-import-options');
+      const confirmBtn = document.getElementById('saver-import-confirm');
+      
+      // 查找同组的所有分片文件
+      const allChunkFiles = await this.findAllChunkFiles(fileInfo, chunkData.chunk.total);
+      const foundCount = allChunkFiles.length;
+      const totalCount = chunkData.chunk.total;
+      
+      // 显示分片信息
+      let previewText = `📦 检测到分片文件（共 ${totalCount} 个分片）\n\n`;
+      previewText += `✅ 已找到 ${foundCount}/${totalCount} 个分片文件\n\n`;
+      
+      // 列出找到的文件
+      previewText += `分片列表：\n`;
+      allChunkFiles.forEach((f, i) => {
+        previewText += `  ${i + 1}. ${f.filename}\n`;
+      });
+      
+      previewText += `\n原始对话总计：\n`;
+      previewText += `- 总消息：${chunkData.original.totalMessages} 条\n`;
+      previewText += `- 总 tokens：~${Math.round(chunkData.original.totalTokens/1000)}k\n\n`;
+      previewText += `👇 点击下方按钮一次性上传所有分片文件`;
+      
+      previewEl.textContent = previewText;
+      
+      // 保存所有分片文件
+      this.currentContextData = chunkData;
+      this.currentFileInfo = fileInfo;
+      this.allChunkFiles = allChunkFiles;  // 保存所有分片
+      
+      metaEl.style.display = 'none';
+      optionsEl.style.display = 'block';
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = `上传全部 ${foundCount} 个分片`;
+    },
+    
+    // 查找同组的所有分片文件
+    async findAllChunkFiles(fileInfo, totalChunks) {
+      const chunkFiles = [];
+      
+      try {
+        // 获取 context 文件夹
+        const workspaceHandle = await savedFolderHandle.getDirectoryHandle(fileInfo.workspace);
+        const convHandle = await workspaceHandle.getDirectoryHandle(fileInfo.conversation);
+        const contextHandle = await convHandle.getDirectoryHandle('context');
+        
+        // 遍历所有文件，查找 part*.json
+        for await (const entry of contextHandle.values()) {
+          if (entry.kind === 'file' && entry.name.includes('_part') && entry.name.endsWith('.json')) {
+            chunkFiles.push({
+              filename: entry.name,
+              handle: entry,
+              workspace: fileInfo.workspace,
+              conversation: fileInfo.conversation
+            });
+          }
+        }
+        
+        // 按文件名排序（part01, part02...)
+        chunkFiles.sort((a, b) => a.filename.localeCompare(b.filename));
+        
+      } catch (e) {
+        console.error('[ChatGPT Saver] 查找分片文件失败:', e);
+      }
+      
+      return chunkFiles;
+    },
+
+    // 显示内容预览（单文件）
+    showContentPreview(data) {
+      const previewEl = document.getElementById('saver-import-preview');
+      const metaEl = document.getElementById('saver-import-meta');
+      const optionsEl = document.getElementById('saver-import-options');
+      const confirmBtn = document.getElementById('saver-import-confirm');
+      
+      // 显示前几条消息预览
+      const previewMessages = data.messages.slice(0, 3).map(m => 
+        `[${m.role}] ${m.content.substring(0, 100)}${m.content.length > 100 ? '...' : ''}`
+      ).join('\n\n');
+      
+      previewEl.textContent = previewMessages + 
+        (data.messages.length > 3 ? `\n\n... 还有 ${data.messages.length - 3} 条消息` : '');
+      
+      // 显示元信息
+      document.getElementById('saver-meta-title').textContent = data.title || '未知';
+      document.getElementById('saver-meta-count').textContent = data.messageCount || data.messages.length;
+      document.getElementById('saver-meta-time').textContent = data.exportedAt 
+        ? new Date(data.exportedAt).toLocaleString('zh-CN') 
+        : '未知';
+      
+      // 显示 tokens 信息（如果有）
+      if (data.totalTokens) {
+        const tokensInfo = document.createElement('div');
+        tokensInfo.className = 'saver-import-meta-item';
+        tokensInfo.innerHTML = `
+          <span class="saver-import-meta-label">Tokens</span>
+          <span class="saver-import-meta-value">~${Math.round(data.totalTokens/1000)}k</span>
+        `;
+        document.getElementById('saver-import-meta').appendChild(tokensInfo);
+      }
+      
+      metaEl.style.display = 'block';
+      optionsEl.style.display = 'block';
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = '作为附件导入';  // 改为文件上传
+    },
+
+    // 显示弹窗
+    async showModal() {
+      this.createImportModal();
+      this.importModal.classList.add('show');
+      
+      // 重置状态
+      this.currentContextData = null;
+      document.getElementById('saver-import-preview').textContent = '正在扫描文件夹...';
+      document.getElementById('saver-import-meta').style.display = 'none';
+      document.getElementById('saver-import-options').style.display = 'none';
+      document.getElementById('saver-import-confirm').disabled = true;
+      document.getElementById('saver-auto-send').checked = false;
+      document.getElementById('saver-file-list-area').style.display = 'none';
+      
+      // 如果有保存文件夹，扫描并显示文件列表
+      if (CONFIG.saveMode === 'folder' && savedFolderHandle) {
+        console.log('[ChatGPT Saver] 扫描保存文件夹中的上下文文件...');
+        this.availableContextFiles = await this.scanContextFiles();
+        this.renderFileList(this.availableContextFiles);
+      } else {
+        document.getElementById('saver-import-preview').textContent = '未选择保存文件夹\n\n请点击“从本地选择”按钮选择 JSON 文件';
+      }
+    },
+
+    // 隐藏弹窗
+    hideModal() {
+      if (this.importModal) {
+        this.importModal.classList.remove('show');
+      }
+    },
+
+    // 确认导入
+    async confirmImport() {
+      if (!this.currentContextData) return;
+      
+      const autoSend = document.getElementById('saver-auto-send').checked;
+      const data = this.currentContextData;
+      
+      console.log('[ChatGPT Saver] confirmImport 被调用, 数据类型:', data.type);
+      
+      this.hideModal();
+      
+      // 决策逻辑：优先使用文件上传
+      const isChunk = data.type === 'chunk';
+      const shouldUploadAsFile = isChunk || this.currentFileInfo;  // 分片或有文件引用，就上传文件
+      
+      if (shouldUploadAsFile) {
+        const fileCount = isChunk && this.allChunkFiles ? this.allChunkFiles.length : 1;
+        console.log(`[ChatGPT Saver] 尝试上传 ${fileCount} 个 JSON 附件...`);
+        UI.showToast(`📎 正在上传 ${fileCount} 个 JSON 附件...`, 'saving', 0);
+        const uploadedCount = await this.uploadAsAttachment();
+        
+        if (uploadedCount) {
+          UI.showToast(`✅ 已上传 ${uploadedCount} 个 JSON 文件`, 'success', 3000);
+          // 清理
+          this.allChunkFiles = null;
+          if (autoSend) {
+            setTimeout(() => this.triggerSend(), 1000);
+          }
+        } else {
+          UI.hideToast();
+          alert('文件上传失败。请手动点击附件按钮上传 JSON 文件。');
+        }
+      } else {
+        // 降级方案：文本注入（通常不会走到这里）
+        console.log('[ChatGPT Saver] 使用文本注入...');
+        UI.showToast('🔄 正在导入上下文...', 'saving', 0);
+        const success = await this.injectToInput();
+        
+        if (success) {
+          UI.showToast('✅ 上下文已导入', 'success', 3000);
+          if (autoSend) {
+            setTimeout(() => this.triggerSend(), 800);
+          }
+        } else {
+          UI.hideToast();
+          alert('导入失败，请手动复制粘贴上下文内容');
+        }
+      }
+    },
+    
+    // 上传为附件（支持批量上传所有分片）
+    async uploadAsAttachment() {
+      try {
+        // 检查是否有多个分片文件
+        const filesToUpload = [];
+        
+        if (this.allChunkFiles && this.allChunkFiles.length > 0) {
+          // 批量上传所有分片
+          console.log(`[ChatGPT Saver] 批量上传 ${this.allChunkFiles.length} 个分片文件`);
+          for (const chunkFile of this.allChunkFiles) {
+            const file = await chunkFile.handle.getFile();
+            filesToUpload.push(file);
+          }
+        } else if (this.currentFileInfo && this.currentFileInfo.handle) {
+          // 单个文件
+          const file = await this.currentFileInfo.handle.getFile();
+          filesToUpload.push(file);
+        } else {
+          // 从当前数据创建文件
+          const jsonStr = JSON.stringify(this.currentContextData, null, 2);
+          const blob = new Blob([jsonStr], { type: 'application/json' });
+          const filename = `context_${this.currentContextData.title || 'import'}.json`;
+          const file = new File([blob], filename, { type: 'application/json', lastModified: Date.now() });
+          filesToUpload.push(file);
+        }
+        
+        console.log(`[ChatGPT Saver] 尝试上传 ${filesToUpload.length} 个文件:`);
+        filesToUpload.forEach(f => console.log(`  - ${f.name} (${f.size} bytes)`));
+        
+        // 查找 ChatGPT 的文件输入
+        const fileInputs = document.querySelectorAll('input[type="file"]');
+        let targetInput = null;
+        for (const input of fileInputs) {
+          if (input.id !== 'saver-file-input') {
+            targetInput = input;
+            break;
+          }
+        }
+        
+        if (!targetInput) {
+          console.error('[ChatGPT Saver] 未找到文件输入框');
+          return false;
+        }
+        
+        console.log('[ChatGPT Saver] 找到文件输入框:', targetInput);
+        
+        // 创建 DataTransfer 并添加所有文件
+        const dataTransfer = new DataTransfer();
+        for (const file of filesToUpload) {
+          dataTransfer.items.add(file);
+        }
+        targetInput.files = dataTransfer.files;
+        
+        // 触发事件
+        targetInput.dispatchEvent(new Event('change', { bubbles: true }));
+        targetInput.dispatchEvent(new Event('input', { bubbles: true }));
+        
+        console.log(`[ChatGPT Saver] ${filesToUpload.length} 个文件上传事件已触发`);
+        
+        // 等待并返回成功
+        await this.sleep(500);
+        return filesToUpload.length;  // 返回上传文件数量
+        
+      } catch (e) {
+        console.error('[ChatGPT Saver] uploadAsAttachment 错误:', e);
+        return false;
+      }
+    },
+
+    // 方案 A: 尝试模拟上传文件附件
+    async tryUploadAsAttachment() {
+      try {
+        const jsonStr = JSON.stringify(this.currentContextData, null, 2);
+        const blob = new Blob([jsonStr], { type: 'application/json' });
+        const filename = `context_${this.currentContextData.title || 'import'}.json`;
+        const file = new File([blob], filename, {
+          type: 'application/json',
+          lastModified: Date.now()
+        });
+
+        // 创建 DataTransfer
+        const dataTransfer = new DataTransfer();
+        dataTransfer.items.add(file);
+
+        // 方式1: 查找隐藏的 file input
+        const fileInputs = document.querySelectorAll('input[type="file"]');
+        for (const input of fileInputs) {
+          if (input.id !== 'saver-file-input') {
+            try {
+              input.files = dataTransfer.files;
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+              await this.sleep(500);
+              
+              // 检查是否有附件出现
+              if (this.checkAttachmentAdded()) {
+                console.log('[ChatGPT Saver] 方案A成功: 通过 file input 上传');
+                return true;
+              }
+            } catch (e) {
+              console.log('[ChatGPT Saver] file input 方式失败:', e);
+            }
+          }
+        }
+
+        // 方式2: 模拟拖放到输入区域
+        const dropTargets = [
+          document.querySelector('body'), // 尝试直接对 body 触发，因为 ChatGPT 的拖放通常是全局监听的
+          document.querySelector('[data-testid="composer"]'),
+          document.querySelector('form'),
+          document.querySelector('#prompt-textarea')?.closest('div'),
+          document.querySelector('main')
+        ].filter(Boolean);
+
+        for (const target of dropTargets) {
+          try {
+            // 模拟 dragenter -> dragover -> drop 序列
+            const dragEnter = new DragEvent('dragenter', {
+              bubbles: true, cancelable: true, dataTransfer
+            });
+            const dragOver = new DragEvent('dragover', {
+              bubbles: true, cancelable: true, dataTransfer
+            });
+            const drop = new DragEvent('drop', {
+              bubbles: true, cancelable: true, dataTransfer
+            });
+            
+            target.dispatchEvent(dragEnter);
+            target.dispatchEvent(dragOver);
+            target.dispatchEvent(drop);
+            
+            await this.sleep(500);
+            
+            if (this.checkAttachmentAdded()) {
+              console.log('[ChatGPT Saver] 方案A成功: 通过拖放上传');
+              return true;
+            }
+          } catch (e) {
+            console.log('[ChatGPT Saver] 拖放方式失败:', e);
+          }
+        }
+
+        console.log('[ChatGPT Saver] 方案A失败，降级到方案B');
+        return false;
+      } catch (e) {
+        console.error('[ChatGPT Saver] tryUploadAsAttachment 错误:', e);
+        return false;
+      }
+    },
+
+    // 检查是否有附件添加成功
+    checkAttachmentAdded() {
+      // ChatGPT 附件相关的选择器
+      const attachmentSelectors = [
+        '[data-testid="attachment"]',
+        '[data-testid="file-thumbnail"]',
+        '[class*="attachment"]',
+        '[class*="file-preview"]'
+      ];
+      
+      for (const selector of attachmentSelectors) {
+        if (document.querySelector(selector)) {
+          return true;
+        }
+      }
+      return false;
+    },
+
+    // 方案 B: 注入到输入框
+    async injectToInput() {
+      try {
+        const input = await this.findInputElement();
+        if (!input) {
+          console.error('[ChatGPT Saver] 未找到输入框');
+          return false;
+        }
+
+        const promptText = this.buildPromptText();
+        
+        if (input.tagName === 'TEXTAREA') {
+          // 设置值
+          input.value = promptText;
+          
+          // 触发多种事件确保 React 感知
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+          
+          // 尝试触发 React 的合成事件
+          const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+            window.HTMLTextAreaElement.prototype, 'value'
+          ).set;
+          nativeInputValueSetter.call(input, promptText);
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          
+        } else if (input.getAttribute('contenteditable') === 'true') {
+          input.innerText = promptText;
+          input.dispatchEvent(new InputEvent('input', { 
+            bubbles: true, 
+            inputType: 'insertText',
+            data: promptText 
+          }));
+        }
+
+        input.focus();
+        console.log('[ChatGPT Saver] 方案B成功: 已注入到输入框');
+        return true;
+      } catch (e) {
+        console.error('[ChatGPT Saver] injectToInput 错误:', e);
+        return false;
+      }
+    },
+
+    // 查找输入框
+    async findInputElement(timeout = 5000) {
+      const selectors = [
+        '#prompt-textarea',
+        'textarea[data-id="root"]',
+        'div[contenteditable="true"][id*="prompt"]',
+        'textarea[placeholder*="Message"]',
+        'textarea[placeholder*="消息"]',
+        'textarea[placeholder*="发送"]',
+        'form textarea'
+      ];
+      
+      const startTime = Date.now();
+      
+      while (Date.now() - startTime < timeout) {
+        for (const selector of selectors) {
+          const el = document.querySelector(selector);
+          if (el) return el;
+        }
+        await this.sleep(200);
+      }
+      
+      return null;
+    },
+
+    // 构建提示文本（智能压缩）
+    buildPromptText() {
+      const data = this.currentContextData;
+      const messageCount = data.messages.length;
+      
+      // 估算 token 数（粗略：1 token ≈ 0.75 中文字或 1 英文单词）
+      const totalChars = data.messages.reduce((sum, m) => sum + m.content.length, 0);
+      const estimatedTokens = Math.ceil(totalChars / 0.75);
+      
+      // 阈值：大于 30k tokens 就需要智能摘要
+      const MAX_TOKENS = 30000;
+      
+      let messagesContent;
+      let summary = '';
+      
+      if (estimatedTokens > MAX_TOKENS || messageCount > 50) {
+        // 长对话：只保留开头 5 条 + 结尾 10 条，中间摘要
+        const firstMessages = data.messages.slice(0, 5);
+        const lastMessages = data.messages.slice(-10);
+        const middleCount = messageCount - 15;
+        
+        messagesContent = [
+          ...firstMessages.map(m => `【${m.role === 'user' ? '用户' : 'ChatGPT'}】\n${m.content}`),
+          `\n[... 中间省略 ${middleCount} 条消息 ...]\n`,
+          ...lastMessages.map(m => `【${m.role === 'user' ? '用户' : 'ChatGPT'}】\n${m.content}`)
+        ].join('\n\n---\n\n');
+        
+        summary = `\n⚠️ **注意**：原对话共 ${messageCount} 条消息，估计 ${estimatedTokens.toLocaleString()} tokens。为了适应上下文窗口，已智能压缩：保留开头 5 条和最近 10 条消息。`;
+      } else {
+        // 短对话：全部保留
+        messagesContent = data.messages.map(m => 
+          `【${m.role === 'user' ? '用户' : 'ChatGPT'}】\n${m.content}`
+        ).join('\n\n---\n\n');
+      }
+      
+      return `请基于以下之前的对话上下文继续我们的讨论：
+
+📝 **对话信息**
+- 标题：${data.title || '未知'}
+- 总消息数：${messageCount} 条
+- 导出时间：${data.exportedAt ? new Date(data.exportedAt).toLocaleString('zh-CN') : '未知'}${summary}
+
+=== 对话内容 ===
+
+${messagesContent}
+
+=== 对话结束 ===
+
+请先确认你已理解上述对话上下文，然后我们继续。`;
+    },
+
+    // 触发发送
+    triggerSend() {
+      const sendButtonSelectors = [
+        'button[data-testid="send-button"]',
+        'button[data-testid="fruitjuice-send-button"]',
+        'form button[type="submit"]',
+        'button[aria-label*="Send"]',
+        'button[aria-label*="发送"]'
+      ];
+      
+      for (const selector of sendButtonSelectors) {
+        const btn = document.querySelector(selector);
+        if (btn && !btn.disabled) {
+          btn.click();
+          console.log('[ChatGPT Saver] 已触发发送按钮');
+          return;
+        }
+      }
+      
+      console.warn('[ChatGPT Saver] 未找到可用的发送按钮');
+    },
+
+    sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+  };
+
   // ==================== 观察器 ====================
   const Observer = {
     observer: null,
@@ -1153,9 +2369,10 @@
 
     addStyles() {
       GM_addStyle(`
-        #chatgpt-saver-panel {
+        :root {
           --saver-bg: #ffffff;
           --saver-text: #333333;
+          --saver-sub-text: #666666;
           --saver-header-bg: #f3f4f6;
           --saver-header-text: #333333;
           --saver-border: #e5e7eb;
@@ -1177,9 +2394,10 @@
           --saver-log-header-error-text: #dc2626;
         }
 
-        #chatgpt-saver-panel.saver-dark {
+        :root.saver-dark {
           --saver-bg: #2d2d2d;
           --saver-text: #e0e0e0;
+          --saver-sub-text: #aaaaaa;
           --saver-header-bg: #1e1e1e;
           --saver-header-text: #ffffff;
           --saver-border: #444444;
@@ -1204,7 +2422,7 @@
         #chatgpt-saver-btn {
           position: fixed; bottom: 20px; right: 20px; width: 50px; height: 50px;
           background: transparent;
-          border: none; border-radius: 50%; cursor: pointer; z-index: 9999;
+          border: none; border-radius: 50%; cursor: pointer; z-index: 10002;
           box-shadow: 0 4px 12px rgba(16, 163, 127, 0.4);
           display: flex; align-items: center; justify-content: center;
           transition: transform 0.2s;
@@ -1239,9 +2457,10 @@
           background: linear-gradient(135deg, #6b7280 0%, #4b5563 100%);
         }
 
+        /* 面板样式 */
         #chatgpt-saver-panel {
           position: fixed; bottom: 80px; right: 20px; width: 320px;
-          background: var(--saver-bg); border-radius: 16px; z-index: 9998;
+          background: var(--saver-bg); border-radius: 16px; z-index: 10003;
           box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
           font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
           display: none;
@@ -1270,8 +2489,7 @@
           background: var(--saver-format-bg); cursor: pointer; text-align: center; transition: all 0.2s;
         }
         .saver-format-btn.active { border-color: var(--saver-format-active-border); background: var(--saver-format-active-bg); }
-        .saver-format-btn span { display: block; font-size: 12px; color: #666; margin-top: 4px; }
-        #chatgpt-saver-panel.saver-dark .saver-format-btn span { color: #aaa; }
+        .saver-format-btn span { display: block; font-size: 12px; color: var(--saver-sub-text); margin-top: 4px; }
 
         .saver-action-btn {
           width: 100%; padding: 12px; border: none; border-radius: 8px;
@@ -1282,8 +2500,7 @@
         .saver-action-btn:hover { opacity: 0.9; }
         .saver-action-btn.secondary { background: var(--saver-sec-btn-bg); color: var(--saver-sec-btn-text); }
 
-        .saver-status { font-size: 12px; color: #666; text-align: center; padding-top: 8px; border-top: 1px solid var(--saver-border); }
-        #chatgpt-saver-panel.saver-dark .saver-status { color: #aaa; }
+        .saver-status { font-size: 12px; color: var(--saver-sub-text); text-align: center; padding-top: 8px; border-top: 1px solid var(--saver-border); }
         .saver-status .active { color: var(--saver-active-color); }
 
         /* 内嵌日志区域 */
@@ -1311,6 +2528,102 @@
         }
         .saver-log-item-inline:last-child { border-bottom: none; }
         .saver-log-time-inline { color: #9ca3af; margin-right: 6px; }
+
+        /* 导入预览弹窗 */
+        .saver-import-modal {
+          position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+          background: rgba(0, 0, 0, 0.6); z-index: 10005;
+          display: flex; align-items: center; justify-content: center;
+          opacity: 0; visibility: hidden; transition: all 0.3s ease;
+        }
+        .saver-import-modal.show { opacity: 1; visibility: visible; }
+        
+        .saver-import-dialog {
+          background: var(--saver-bg); border-radius: 16px; width: 90%; max-width: 500px;
+          max-height: 80vh; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+          display: flex; flex-direction: column;
+          border: 1px solid var(--saver-border);
+        }
+        
+        .saver-import-header {
+          padding: 20px; background: var(--saver-header-bg);
+          color: var(--saver-header-text);
+        }
+        .saver-import-header h3 { margin: 0 0 4px 0; font-size: 18px; font-weight: 600; }
+        .saver-import-header p { margin: 0; font-size: 13px; opacity: 0.7; }
+        
+        .saver-import-content { padding: 20px; overflow-y: auto; flex: 1; }
+        
+        .saver-import-preview {
+          background: var(--saver-log-bg); border-radius: 8px; padding: 12px;
+          font-size: 12px; max-height: 200px; overflow-y: auto;
+          font-family: 'Consolas', 'Monaco', monospace; white-space: pre-wrap;
+          word-break: break-all; color: var(--saver-log-text);
+          border: 1px solid var(--saver-border);
+        }
+        
+        .saver-import-meta {
+          margin-top: 16px; padding: 12px; background: var(--saver-format-bg);
+          border-radius: 8px; font-size: 13px;
+          border: 1px solid var(--saver-border);
+        }
+        .saver-import-meta-item {
+          display: flex; justify-content: space-between; padding: 4px 0;
+          border-bottom: 1px solid var(--saver-border);
+        }
+        .saver-import-meta-item:last-child { border-bottom: none; }
+        .saver-import-meta-label { color: var(--saver-sub-text); opacity: 0.8; }
+        .saver-import-meta-value { font-weight: 600; color: var(--saver-text); }
+        
+        .saver-import-options {
+          margin-top: 16px; padding: 12px; background: var(--saver-format-bg);
+          border-radius: 8px;
+          border: 1px solid var(--saver-border);
+        }
+        .saver-import-options label {
+          display: flex; align-items: center; gap: 8px; cursor: pointer;
+          padding: 8px 0; font-size: 14px; color: var(--saver-text);
+        }
+        .saver-import-options input[type="checkbox"] {
+          width: 18px; height: 18px; cursor: pointer;
+        }
+        
+        .saver-import-footer {
+          padding: 16px 20px; border-top: 1px solid var(--saver-border);
+          display: flex; gap: 12px; justify-content: flex-end;
+          background: var(--saver-bg);
+        }
+        
+        .saver-import-btn {
+          padding: 10px 20px; border-radius: 8px; font-size: 14px; font-weight: 600;
+          cursor: pointer; border: none; transition: all 0.2s;
+        }
+        .saver-import-btn.primary {
+          background: var(--saver-primary-btn-bg); color: var(--saver-primary-btn-text);
+        }
+        .saver-import-btn.primary:hover { opacity: 0.9; transform: translateY(-1px); }
+        .saver-import-btn.secondary {
+          background: var(--saver-sec-btn-bg); color: var(--saver-sec-btn-text);
+        }
+        .saver-import-btn.secondary:hover { opacity: 0.8; }
+        
+        /* 隐藏的文件选择器 */
+        #saver-file-input { display: none; }
+        
+        /* 分隔线 */
+        .saver-divider {
+          height: 1px; background: var(--saver-border); margin: 12px 0;
+        }
+        
+        /* 按钮组样式优化 */
+        .saver-btn-group {
+          display: flex; gap: 8px; margin-bottom: 8px;
+        }
+        .saver-btn-group .saver-action-btn {
+          flex: 1; margin-bottom: 0;
+          pointer-events: auto !important;
+          cursor: pointer !important;
+        }
       `);
     },
 
@@ -1368,7 +2681,14 @@
           </div>
           <button class="saver-action-btn" id="saver-export-btn">💾 立即导出当前对话</button>
           <button class="saver-action-btn secondary" id="saver-select-folder">📁 选择保存文件夹</button>
-          <div class="saver-folder-status" id="saver-folder-status" style="margin-bottom: 8px; font-size: 12px; color: #666;">
+          
+          <div class="saver-divider"></div>
+          <div style="font-size: 12px; color: #666; margin-bottom: 8px; font-weight: 600;">🔄 上下文传递</div>
+          <div class="saver-btn-group">
+            <button class="saver-action-btn secondary" id="saver-export-context" style="font-size: 12px; padding: 10px;">📤 导出上下文</button>
+            <button class="saver-action-btn secondary" id="saver-import-context" style="font-size: 12px; padding: 10px;">📥 导入上下文</button>
+          </div>
+          <div class="saver-folder-status" id="saver-folder-status" style="margin-bottom: 8px; font-size: 12px; color: var(--saver-sub-text);">
             保存位置: <span id="saver-folder-name" style="color: var(--saver-active-color);">浏览器下载</span>
           </div>
           <button class="saver-action-btn secondary" id="saver-auto-toggle" style="font-size: 12px; padding: 8px;">
@@ -1439,6 +2759,30 @@
         GM_setValue('showLogPanel', CONFIG.showLogPanel);
         e.target.textContent = CONFIG.showLogPanel ? '📋 显示日志弹框: 开启' : '📋 显示日志弹框: 关闭';
       };
+
+      // 导出上下文 JSON
+      const exportContextBtn = document.getElementById('saver-export-context');
+      if (exportContextBtn) {
+        exportContextBtn.onclick = () => {
+          console.log('[ChatGPT Saver] 导出上下文按钮被点击');
+          ContextExporter.export();
+        };
+        console.log('[ChatGPT Saver] 导出上下文按钮事件已绑定');
+      } else {
+        console.error('[ChatGPT Saver] 找不到导出上下文按钮');
+      }
+
+      // 导入上下文
+      const importContextBtn = document.getElementById('saver-import-context');
+      if (importContextBtn) {
+        importContextBtn.onclick = () => {
+          console.log('[ChatGPT Saver] 导入上下文按钮被点击');
+          ContextImporter.showModal();
+        };
+        console.log('[ChatGPT Saver] 导入上下文按钮事件已绑定');
+      } else {
+        console.error('[ChatGPT Saver] 找不到导入上下文按钮');
+      }
     },
 
     createLogPanel() {
@@ -1461,16 +2805,19 @@
     },
 
     applyTheme() {
-      const panel = document.getElementById('chatgpt-saver-panel');
+      const html = document.documentElement;
       const btn = document.getElementById('saver-theme-toggle');
-      if (panel) {
-        if (this.theme === 'night') {
-          panel.classList.add('saver-dark');
-          if(btn) btn.textContent = '🌙';
-        } else {
-          panel.classList.remove('saver-dark');
-          if(btn) btn.textContent = '🌞';
-        }
+      const panel = document.getElementById('chatgpt-saver-panel');
+      
+      if (this.theme === 'night') {
+        html.classList.add('saver-dark');
+        // 兼容旧逻辑，给panel也加上（虽然现在变量在root上，但保持以防万一）
+        if(panel) panel.classList.add('saver-dark');
+        if(btn) btn.textContent = '🌙';
+      } else {
+        html.classList.remove('saver-dark');
+        if(panel) panel.classList.remove('saver-dark');
+        if(btn) btn.textContent = '🌞';
       }
     },
 

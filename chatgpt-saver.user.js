@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT 对话保存助手
 // @namespace    https://github.com/a182860089-pixel/massage
-// @version      2.2
+// @version      2.3
 // @description  自动保存 ChatGPT 对话，支持导出为 HTML、Markdown、PDF 格式，支持上下文导出与导入
 // @author       ChatGPT Saver
 // @match        https://chat.openai.com/*
@@ -39,7 +39,7 @@
     // 更新检查配置
     updateCheckInterval: 3 * 24 * 60 * 60 * 1000, // 3天（毫秒）
     updateURL: 'https://raw.githubusercontent.com/a182860089-pixel/massage/main/chatgpt-saver.user.js',
-    currentVersion: '2.2'
+    currentVersion: '2.3'
   };
 
   // 保存的文件夹句柄
@@ -2957,7 +2957,10 @@ ${messagesContent}
         
         if (!remoteVersion) {
           if (manual) {
-            UI.showToast('❌ 检查更新失败，请稍后重试', 'error', 3000);
+            // 网络失败时提供手动检查链接
+            UI.showToast('❌ 网络请求失败，可能是网络问题', 'error', 5000);
+            // 显示手动检查指引
+            this.showManualCheckGuide();
           }
           return null;
         }
@@ -2987,25 +2990,47 @@ ${messagesContent}
     // 从远程获取版本号
     fetchRemoteVersion() {
       return new Promise((resolve) => {
+        // 检查 GM_xmlhttpRequest 是否可用
+        if (typeof GM_xmlhttpRequest === 'undefined') {
+          console.error('[ChatGPT Saver] GM_xmlhttpRequest 不可用');
+          resolve(null);
+          return;
+        }
+        
+        console.log('[ChatGPT Saver] 正在请求:', CONFIG.updateURL);
+        
         GM_xmlhttpRequest({
           method: 'GET',
           url: CONFIG.updateURL + '?t=' + Date.now(), // 缓存破坏
-          timeout: 10000,
+          timeout: 15000, // 增加超时时间
+          headers: {
+            'Cache-Control': 'no-cache'
+          },
           onload: (response) => {
+            console.log('[ChatGPT Saver] 请求响应状态:', response.status);
             if (response.status === 200) {
               // 从脚本头部提取版本号
               const match = response.responseText.match(/@version\s+([\d.]+)/);
               if (match) {
+                console.log('[ChatGPT Saver] 获取到远程版本:', match[1]);
                 resolve(match[1]);
               } else {
+                console.error('[ChatGPT Saver] 无法解析版本号');
                 resolve(null);
               }
             } else {
+              console.error('[ChatGPT Saver] 请求失败:', response.status);
               resolve(null);
             }
           },
-          onerror: () => resolve(null),
-          ontimeout: () => resolve(null)
+          onerror: (error) => {
+            console.error('[ChatGPT Saver] 网络请求错误:', error);
+            resolve(null);
+          },
+          ontimeout: () => {
+            console.error('[ChatGPT Saver] 请求超时');
+            resolve(null);
+          }
         });
       });
     },
@@ -3063,6 +3088,34 @@ ${messagesContent}
     // 打开更新页面
     openUpdatePage() {
       window.open(CONFIG.updateURL, '_blank');
+    },
+    
+    // 显示手动检查指引（网络失败时）
+    showManualCheckGuide() {
+      const updateArea = document.getElementById('saver-update-area');
+      if (updateArea) {
+        updateArea.style.display = 'block';
+        updateArea.innerHTML = `
+          <div style="background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px;">
+            <div style="font-size: 12px; font-weight: 600; color: #92400e; margin-bottom: 6px;">⚠️ 无法自动检查更新</div>
+            <div style="font-size: 11px; color: #78350f; margin-bottom: 8px; line-height: 1.5;">
+              可能是网络问题（raw.githubusercontent.com 在国内访问可能不稳定）。<br/>
+              你可以点击下方按钮手动查看最新版本：
+            </div>
+            <button id="saver-manual-check" style="
+              width: 100%; padding: 8px; border: none; border-radius: 6px;
+              background: #f59e0b; color: white; font-size: 12px; font-weight: 600;
+              cursor: pointer; transition: background 0.2s;
+            ">打开 GitHub 查看最新版本</button>
+            <div style="font-size: 10px; color: #78350f; margin-top: 6px; opacity: 0.8;">
+              当前版本: v${CONFIG.currentVersion}
+            </div>
+          </div>
+        `;
+        document.getElementById('saver-manual-check').onclick = () => {
+          window.open('https://github.com/a182860089-pixel/massage', '_blank');
+        };
+      }
     },
     
     // 自动检查（启动时调用）

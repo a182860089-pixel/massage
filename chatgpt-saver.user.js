@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT 对话保存助手
 // @namespace    https://github.com/a182860089-pixel/massage
-// @version      2.1
+// @version      2.2
 // @description  自动保存 ChatGPT 对话，支持导出为 HTML、Markdown、PDF 格式，支持上下文导出与导入
 // @author       ChatGPT Saver
 // @match        https://chat.openai.com/*
@@ -16,6 +16,8 @@
 // @grant        GM_addStyle
 // @grant        GM_download
 // @grant        GM_notification
+// @grant        GM_xmlhttpRequest
+// @connect      raw.githubusercontent.com
 // @require      https://unpkg.com/turndown@7.1.2/dist/turndown.js
 // @require      https://unpkg.com/html2canvas@1.4.1/dist/html2canvas.min.js
 // @require      https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js
@@ -33,7 +35,11 @@
     debounceDelay: 3000,
     showPanel: true,
     showLogPanel: GM_getValue('showLogPanel', true), // 是否显示日志弹框
-    saveMode: 'download' // 'download' 或 'folder'
+    saveMode: 'download', // 'download' 或 'folder'
+    // 更新检查配置
+    updateCheckInterval: 3 * 24 * 60 * 60 * 1000, // 3天（毫秒）
+    updateURL: 'https://raw.githubusercontent.com/a182860089-pixel/massage/main/chatgpt-saver.user.js',
+    currentVersion: '2.2'
   };
 
   // 保存的文件夹句柄
@@ -2928,6 +2934,146 @@ ${messagesContent}
     }
   };
 
+  // ==================== 更新检查器 ====================
+  const UpdateChecker = {
+    // 检查更新
+    async checkForUpdate(manual = false) {
+      const lastCheck = GM_getValue('lastUpdateCheck', 0);
+      const now = Date.now();
+      
+      // 如果不是手动检查，且距离上次检查不到 3 天，则跳过
+      if (!manual && (now - lastCheck) < CONFIG.updateCheckInterval) {
+        console.log('[ChatGPT Saver] 距离上次检查不到 3 天，跳过自动检查');
+        return null;
+      }
+      
+      if (manual) {
+        UI.showToast('⚙️ 正在检查更新...', 'info', 0);
+      }
+      
+      try {
+        const remoteVersion = await this.fetchRemoteVersion();
+        GM_setValue('lastUpdateCheck', now);
+        
+        if (!remoteVersion) {
+          if (manual) {
+            UI.showToast('❌ 检查更新失败，请稍后重试', 'error', 3000);
+          }
+          return null;
+        }
+        
+        const hasUpdate = this.compareVersions(remoteVersion, CONFIG.currentVersion) > 0;
+        
+        if (hasUpdate) {
+          console.log(`[ChatGPT Saver] 发现新版本: ${remoteVersion} (当前: ${CONFIG.currentVersion})`);
+          this.showUpdateNotification(remoteVersion, manual);
+          return { hasUpdate: true, remoteVersion };
+        } else {
+          console.log(`[ChatGPT Saver] 已是最新版本: ${CONFIG.currentVersion}`);
+          if (manual) {
+            UI.showToast(`✅ 已是最新版本 (v${CONFIG.currentVersion})`, 'success', 3000);
+          }
+          return { hasUpdate: false, remoteVersion };
+        }
+      } catch (e) {
+        console.error('[ChatGPT Saver] 检查更新失败:', e);
+        if (manual) {
+          UI.showToast('❌ 检查更新失败', 'error', 3000);
+        }
+        return null;
+      }
+    },
+    
+    // 从远程获取版本号
+    fetchRemoteVersion() {
+      return new Promise((resolve) => {
+        GM_xmlhttpRequest({
+          method: 'GET',
+          url: CONFIG.updateURL + '?t=' + Date.now(), // 缓存破坏
+          timeout: 10000,
+          onload: (response) => {
+            if (response.status === 200) {
+              // 从脚本头部提取版本号
+              const match = response.responseText.match(/@version\s+([\d.]+)/);
+              if (match) {
+                resolve(match[1]);
+              } else {
+                resolve(null);
+              }
+            } else {
+              resolve(null);
+            }
+          },
+          onerror: () => resolve(null),
+          ontimeout: () => resolve(null)
+        });
+      });
+    },
+    
+    // 版本号比较：返回 1 表示 v1 > v2，0 表示相等，-1 表示 v1 < v2
+    compareVersions(v1, v2) {
+      const parts1 = v1.split('.').map(Number);
+      const parts2 = v2.split('.').map(Number);
+      
+      for (let i = 0; i < Math.max(parts1.length, parts2.length); i++) {
+        const num1 = parts1[i] || 0;
+        const num2 = parts2[i] || 0;
+        if (num1 > num2) return 1;
+        if (num1 < num2) return -1;
+      }
+      return 0;
+    },
+    
+    // 显示更新通知
+    showUpdateNotification(newVersion, isManual) {
+      // 使用 GM_notification 显示系统通知
+      GM_notification({
+        title: 'ChatGPT 对话保存助手',
+        text: `发现新版本 v${newVersion}！\n点击此处更新`,
+        timeout: 10000,
+        onclick: () => this.openUpdatePage()
+      });
+      
+      // 同时在页面上显示 Toast
+      UI.showToast(`🆕 发现新版本 v${newVersion}，点击更新`, 'success', 0);
+      
+      // 在面板上显示更新按钮
+      this.showUpdateButton(newVersion);
+    },
+    
+    // 在面板上显示更新按钮
+    showUpdateButton(newVersion) {
+      const updateArea = document.getElementById('saver-update-area');
+      if (updateArea) {
+        updateArea.style.display = 'block';
+        updateArea.innerHTML = `
+          <div style="background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px;">
+            <div style="font-size: 12px; font-weight: 600; color: #92400e; margin-bottom: 6px;">🆕 发现新版本 v${newVersion}</div>
+            <button id="saver-do-update" style="
+              width: 100%; padding: 8px; border: none; border-radius: 6px;
+              background: #f59e0b; color: white; font-size: 12px; font-weight: 600;
+              cursor: pointer; transition: background 0.2s;
+            "点击立即更新</button>
+          </div>
+        `;
+        document.getElementById('saver-do-update').onclick = () => this.openUpdatePage();
+      }
+    },
+    
+    // 打开更新页面
+    openUpdatePage() {
+      window.open(CONFIG.updateURL, '_blank');
+    },
+    
+    // 自动检查（启动时调用）
+    autoCheck() {
+      // 延迟 5 秒检查，不阻塞页面加载
+      setTimeout(() => {
+        this.checkForUpdate(false);
+      }, 5000);
+    }
+  };
+
   // ==================== 观察器 ====================
   const Observer = {
     observer: null,
@@ -3852,7 +3998,17 @@ ${messagesContent}
           </div>
           <div class="saver-status" id="saver-observer-status">
             状态: <span id="saver-observer-text">未启动</span>
+            <span style="margin-left: 12px; color: var(--saver-sub-text);">v${CONFIG.currentVersion}</span>
+            <button id="saver-check-update" style="
+              margin-left: 8px; padding: 2px 8px; font-size: 11px;
+              background: var(--saver-sec-btn-bg); color: var(--saver-sec-btn-text);
+              border: 1px solid var(--saver-border); border-radius: 4px;
+              cursor: pointer; transition: background 0.2s;
+            ">检查更新</button>
           </div>
+          
+          <!-- 更新提示区域 -->
+          <div id="saver-update-area" style="display: none;"></div>
           
           <!-- 内嵌日志区域 -->
           <div class="saver-log-area" id="saver-log-area">
@@ -3935,6 +4091,15 @@ ${messagesContent}
         console.log('[ChatGPT Saver] 导入上下文按钮事件已绑定');
       } else {
         console.error('[ChatGPT Saver] 找不到导入上下文按钮');
+      }
+
+      // 检查更新按钮
+      const checkUpdateBtn = document.getElementById('saver-check-update');
+      if (checkUpdateBtn) {
+        checkUpdateBtn.onclick = () => {
+          console.log('[ChatGPT Saver] 检查更新按钮被点击');
+          UpdateChecker.checkForUpdate(true);
+        };
       }
     },
 
@@ -4364,6 +4529,9 @@ ${messagesContent}
       // 启动 URL 监听
       setupHistoryListener();
       startURLWatcher();
+      
+      // 自动检查更新（每 3 天检查一次）
+      UpdateChecker.autoCheck();
     };
 
     // 确保DOM已加载

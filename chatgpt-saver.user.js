@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT 对话保存助手
 // @namespace    https://github.com/a182860089-pixel/massage
-// @version      2.3
+// @version      2.4
 // @description  自动保存 ChatGPT 对话，支持导出为 HTML、Markdown、PDF 格式，支持上下文导出与导入
 // @author       ChatGPT Saver
 // @match        https://chat.openai.com/*
@@ -9,8 +9,8 @@
 // @match        https://*.openai.com/*
 // @match        https://*.chatgpt.com/*
 // @icon         https://chat.openai.com/favicon.ico
-// @updateURL    https://raw.githubusercontent.com/a182860089-pixel/massage/main/chatgpt-saver.user.js
-// @downloadURL  https://raw.githubusercontent.com/a182860089-pixel/massage/main/chatgpt-saver.user.js
+// @updateURL    https://mirror.ghproxy.com/https://raw.githubusercontent.com/a182860089-pixel/massage/main/chatgpt-saver.user.js
+// @downloadURL  https://mirror.ghproxy.com/https://raw.githubusercontent.com/a182860089-pixel/massage/main/chatgpt-saver.user.js
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addStyle
@@ -18,6 +18,7 @@
 // @grant        GM_notification
 // @grant        GM_xmlhttpRequest
 // @connect      raw.githubusercontent.com
+// @connect      mirror.ghproxy.com
 // @require      https://unpkg.com/turndown@7.1.2/dist/turndown.js
 // @require      https://unpkg.com/html2canvas@1.4.1/dist/html2canvas.min.js
 // @require      https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js
@@ -38,8 +39,8 @@
     saveMode: 'download', // 'download' 或 'folder'
     // 更新检查配置
     updateCheckInterval: 3 * 24 * 60 * 60 * 1000, // 3天（毫秒）
-    updateURL: 'https://raw.githubusercontent.com/a182860089-pixel/massage/main/chatgpt-saver.user.js',
-    currentVersion: '2.3'
+    updateURL: 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/a182860089-pixel/massage/main/chatgpt-saver.user.js',
+    currentVersion: '2.4'
   };
 
   // 保存的文件夹句柄

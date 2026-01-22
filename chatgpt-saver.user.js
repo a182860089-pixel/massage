@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT 对话保存助手
 // @namespace    https://github.com/a182860089-pixel/massage
-// @version      2.4
+// @version      2.5
 // @description  自动保存 ChatGPT 对话，支持导出为 HTML、Markdown、PDF 格式，支持上下文导出与导入
 // @author       ChatGPT Saver
 // @match        https://chat.openai.com/*
@@ -40,7 +40,7 @@
     // 更新检查配置
     updateCheckInterval: 3 * 24 * 60 * 60 * 1000, // 3天（毫秒）
     updateURL: 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/a182860089-pixel/massage/main/chatgpt-saver.user.js',
-    currentVersion: '2.4'
+    currentVersion: '2.5'
   };
 
   // 保存的文件夹句柄
@@ -976,6 +976,7 @@
     resolveCallback: null,
     collectionFolderHandle: null,  // 文件收集文件夹句柄
     collectionFiles: [],  // 收集文件夹中的文件列表
+    uploadInterceptorStarted: false,  // 上传拦截器是否已启动
     
     // 初始化：尝试恢复收集文件夹
     async init() {
@@ -991,14 +992,122 @@
         });
         
         if (handle) {
-          const permission = await handle.queryPermission({ mode: 'read' });
+          const permission = await handle.queryPermission({ mode: 'readwrite' });
           if (permission === 'granted') {
             this.collectionFolderHandle = handle;
             console.log('[ChatGPT Saver] 收集文件夹已恢复:', handle.name);
+            
+            // 扫描收集文件夹，获取已有文件列表
+            await this.scanCollectionFolder();
           }
         }
       } catch (e) {
         console.log('[ChatGPT Saver] 恢复收集文件夹失败:', e.message);
+      }
+      
+      // 启动文件上传拦截器
+      this.startUploadInterceptor();
+    },
+    
+    // ==================== 文件上传拦截器 ====================
+    // 监听用户上传文件，立即保存到收集文件夹
+    startUploadInterceptor() {
+      if (this.uploadInterceptorStarted) return;
+      this.uploadInterceptorStarted = true;
+      
+      console.log('[ChatGPT Saver] 启动文件上传拦截器...');
+      
+      // 监听所有 file input 的 change 事件（使用事件委托）
+      document.addEventListener('change', async (e) => {
+        const target = e.target;
+        
+        // 检查是否是文件输入框，且不是我们自己的
+        if (target.type === 'file' && target.id !== 'saver-file-input' && !target.id?.startsWith('saver-attach-file-')) {
+          const files = target.files;
+          if (files && files.length > 0) {
+            console.log(`[ChatGPT Saver] 检测到用户上传 ${files.length} 个文件`);
+            await this.interceptUploadedFiles(files);
+          }
+        }
+      }, true);  // 使用捕获阶段，确保最先捕获到事件
+      
+      // 同时监听拖放上传
+      document.addEventListener('drop', async (e) => {
+        // 等待一小段时间，让 ChatGPT 先处理
+        setTimeout(async () => {
+          const dataTransfer = e.dataTransfer;
+          if (dataTransfer && dataTransfer.files && dataTransfer.files.length > 0) {
+            console.log(`[ChatGPT Saver] 检测到拖放上传 ${dataTransfer.files.length} 个文件`);
+            await this.interceptUploadedFiles(dataTransfer.files);
+          }
+        }, 100);
+      }, true);
+      
+      console.log('[ChatGPT Saver] 文件上传拦截器已启动');
+    },
+    
+    // 拦截并保存上传的文件
+    async interceptUploadedFiles(fileList) {
+      // 检查是否有收集文件夹
+      if (!this.collectionFolderHandle) {
+        console.log('[ChatGPT Saver] 未设置收集文件夹，跳过自动保存');
+        return;
+      }
+      
+      // 检查权限
+      try {
+        const permission = await this.collectionFolderHandle.queryPermission({ mode: 'readwrite' });
+        if (permission !== 'granted') {
+          console.log('[ChatGPT Saver] 收集文件夹权限不足，跳过自动保存');
+          return;
+        }
+      } catch (e) {
+        console.log('[ChatGPT Saver] 检查收集文件夹权限失败:', e.message);
+        return;
+      }
+      
+      let savedCount = 0;
+      
+      for (const file of fileList) {
+        try {
+          // 检查文件是否已存在
+          const exists = this.collectionFiles.some(
+            cf => cf.name.toLowerCase() === file.name.toLowerCase()
+          );
+          
+          if (exists) {
+            console.log(`[ChatGPT Saver] 文件已存在于收集文件夹: ${file.name}`);
+            continue;
+          }
+          
+          // 保存到收集文件夹
+          const success = await Utils.saveToFolder(
+            this.collectionFolderHandle,
+            file.name,
+            file,
+            file.type
+          );
+          
+          if (success) {
+            savedCount++;
+            console.log(`[ChatGPT Saver] ✅ 文件已保存到收集文件夹: ${file.name}`);
+            
+            // 更新缓存
+            this.collectionFiles.push({
+              name: file.name,
+              file: file,
+              size: file.size,
+              type: this.guessFileType(file.name),
+              icon: this.getFileIcon(this.guessFileType(file.name))
+            });
+          }
+        } catch (e) {
+          console.error(`[ChatGPT Saver] 保存文件失败 ${file.name}:`, e);
+        }
+      }
+      
+      if (savedCount > 0) {
+        UI.showToast(`📥 已自动保存 ${savedCount} 个文件到收集文件夹`, 'success', 3000);
       }
     },
     
@@ -1009,7 +1118,8 @@
         return null;
       }
       try {
-        const handle = await window.showDirectoryPicker({ mode: 'read' });
+        // 使用 readwrite 模式，因为需要复制文件到收集文件夹
+        const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
         this.collectionFolderHandle = handle;
         
         // 保存到 IndexedDB
@@ -1040,10 +1150,10 @@
       
       const files = [];
       try {
-        // 检查权限
-        const permission = await this.collectionFolderHandle.queryPermission({ mode: 'read' });
+        // 检查权限（请求读写权限，因为需要复制文件到收集文件夹）
+        const permission = await this.collectionFolderHandle.queryPermission({ mode: 'readwrite' });
         if (permission !== 'granted') {
-          const request = await this.collectionFolderHandle.requestPermission({ mode: 'read' });
+          const request = await this.collectionFolderHandle.requestPermission({ mode: 'readwrite' });
           if (request !== 'granted') {
             console.log('[ChatGPT Saver] 收集文件夹权限被拒绝');
             return [];
@@ -1075,29 +1185,45 @@
       return files;
     },
 
-    // 扫描页面上的附件元素
+    // 扫描页面上的附件元素（只扫描用户上传的附件，排除 GPT 回复中的引用）
     scanAttachments() {
-      console.log('[ChatGPT Saver] ===== 开始扫描附件 =====');
+      console.log('[ChatGPT Saver] ===== 开始扫描用户上传的附件 =====');
       const attachments = [];
       
-      // 首先尝试通过消息内容区域查找附件
+      // 只扫描用户消息中的附件（排除 GPT 回复中的引用）
       const userMessages = document.querySelectorAll('[data-message-author-role="user"]');
       console.log(`[ChatGPT Saver] 找到 ${userMessages.length} 条用户消息`);
       
       for (const msgEl of userMessages) {
-        // 在每条用户消息中查找附件
-        // ChatGPT 附件通常包含在消息元素内部
-        const parent = msgEl.closest('[class*="group"]') || msgEl.parentElement?.parentElement;
-        if (parent) {
-          // 查找包含文件名的元素
-          const fileElements = parent.querySelectorAll('[class*="truncate"], [class*="overflow-hidden"], [class*="text-ellipsis"]');
-          for (const el of fileElements) {
-            const text = el.textContent?.trim();
-            // 检查是否像文件名（包含扩展名或特定模式）
-            if (text && text.length < 200 && (text.match(/\.[a-zA-Z0-9]{2,5}$/) || text.match(/\.[a-zA-Z0-9]{2,5}\.\.\./))) {
-              console.log(`[ChatGPT Saver] 通过消息区域找到可能的文件: "${text}"`);
+        // 获取用户消息的容器（包括附件区域）
+        const messageContainer = msgEl.closest('[class*="group"]') || 
+                                  msgEl.closest('article') ||
+                                  msgEl.parentElement?.parentElement;
+        
+        if (!messageContainer) continue;
+        
+        // 方法 1: 查找带有文件扩展名的文本元素
+        const textElements = messageContainer.querySelectorAll(
+          '[class*="truncate"], [class*="overflow-hidden"], [class*="text-ellipsis"], [class*="line-clamp"]'
+        );
+        
+        for (const el of textElements) {
+          // 排除 GPT 回复中的元素（footnote/引用按钮）
+          if (el.closest('[data-message-author-role="assistant"]') ||
+              el.closest('[class*="footnote"]') ||
+              el.closest('[class*="citation"]')) {
+            continue;
+          }
+          
+          const text = el.textContent?.trim();
+          // 检查是否像文件名
+          if (text && text.length < 200 && text.length > 2) {
+            // 匹配常见文件扩展名
+            if (text.match(/\.(doc|docx|pdf|txt|md|json|csv|xls|xlsx|ppt|pptx|zip|rar|png|jpg|jpeg|gif|py|js|ts|html|css|java|cpp|c|xml|yaml|yml)$/i) ||
+                text.match(/\.(doc|docx|pdf|txt|md|json|csv|xls|xlsx|ppt|pptx|zip|rar|png|jpg|jpeg|gif|py|js|ts|html|css|java|cpp|c|xml|yaml|yml)\.\.\./i)) {
               const cleanName = text.replace(/\.\.\.\s*$/, '').trim();
               if (cleanName && !attachments.some(a => a.name === cleanName)) {
+                console.log(`[ChatGPT Saver] 找到用户上传的文件: "${cleanName}"`);
                 attachments.push({
                   name: cleanName,
                   type: this.guessFileType(cleanName),
@@ -1107,50 +1233,36 @@
             }
           }
         }
-      }
-      
-      // 查找所有可能的附件元素
-      const selectors = [
-        '[data-testid="attachment"]',
-        '[data-testid="file-thumbnail"]',
-        '[class*="attachment"]',
-        '[class*="file"][class*="preview"]',
-        'img[src*="files.oaiusercontent.com"]',
-        'a[href*="/mnt/data/"]',
-        'a[download]',
-        // 更多 ChatGPT 文件相关选择器
-        '[data-testid*="file"]',
-        '[aria-label*="file"]',
-        '[aria-label*="文件"]',
-        '.uploaded-file',
-        '[class*="upload"]',
-        // 新增：文档图标相关
-        '[class*="document"]',
-        'button[class*="group"]',
-        // 查找包含文件名模式的元素
-        '[title*="."]'
-      ];
-      
-      for (const selector of selectors) {
-        try {
-          const elements = document.querySelectorAll(selector);
-          console.log(`[ChatGPT Saver] 选择器 "${selector}" 找到 ${elements.length} 个元素`);
-          for (const el of elements) {
-            console.log(`[ChatGPT Saver]   - 元素:`, el.tagName, el.className?.substring(0, 50), el.getAttribute('data-testid'));
-            const attachment = this.parseAttachmentElement(el);
-            if (attachment) {
-              console.log(`[ChatGPT Saver]   → 解析到文件: ${attachment.name}`);
-              if (!attachments.some(a => a.name === attachment.name)) {
+        
+        // 方法 2: 在用户消息容器内查找附件特定选择器
+        const attachmentSelectors = [
+          '[data-testid="attachment"]',
+          '[data-testid="file-thumbnail"]',
+          '[class*="attachment"]:not([class*="footnote"])',
+          'img[src*="files.oaiusercontent.com"]',
+          'a[download]'
+        ];
+        
+        for (const selector of attachmentSelectors) {
+          try {
+            const elements = messageContainer.querySelectorAll(selector);
+            for (const el of elements) {
+              // 确保不是 GPT 回复中的元素
+              if (el.closest('[data-message-author-role="assistant"]')) continue;
+              
+              const attachment = this.parseAttachmentElement(el);
+              if (attachment && !attachments.some(a => a.name === attachment.name)) {
+                console.log(`[ChatGPT Saver] 通过选择器找到文件: "${attachment.name}"`);
                 attachments.push(attachment);
               }
             }
+          } catch (e) {
+            // 忽略选择器错误
           }
-        } catch (e) {
-          console.log(`[ChatGPT Saver] 选择器 "${selector}" 错误:`, e.message);
         }
       }
       
-      console.log(`[ChatGPT Saver] ===== 扫描完成，共 ${attachments.length} 个附件 =====`);
+      console.log(`[ChatGPT Saver] ===== 扫描完成，共 ${attachments.length} 个用户上传的附件 =====`);
       if (attachments.length > 0) {
         console.log('[ChatGPT Saver] 附件列表:', attachments.map(a => a.name));
       }
@@ -1491,6 +1603,180 @@
         this.resolveCallback(files);
         this.resolveCallback = null;
       }
+    },
+    
+    // ==================== 自动保存附件（自动保存时调用） ====================
+    async autoSaveAttachments(safeWorkspace, safeTitle) {
+      console.log('[ChatGPT Saver] ===== autoSaveAttachments 开始 =====');
+      
+      // 检查是否有保存文件夹
+      if (!savedFolderHandle) {
+        console.log('[ChatGPT Saver] 没有保存文件夹，跳过附件保存');
+        return;
+      }
+      
+      // 扫描页面上的附件
+      const detectedFiles = this.scanAttachments();
+      
+      if (detectedFiles.length === 0) {
+        console.log('[ChatGPT Saver] 未检测到附件，跳过');
+        return;
+      }
+      
+      console.log(`[ChatGPT Saver] 检测到 ${detectedFiles.length} 个附件`);
+      UI.addLog(`📎 检测到 ${detectedFiles.length} 个附件`);
+      
+      // 扫描收集文件夹
+      await this.scanCollectionFolder();
+      
+      // 尝试自动匹配
+      const matchedFiles = [];
+      const unmatchedFiles = [];
+      
+      for (const detected of detectedFiles) {
+        const matched = this.findMatchingFile(detected.name);
+        if (matched) {
+          matchedFiles.push({ detected, matched });
+          console.log(`[ChatGPT Saver] ✅ 自动匹配: ${detected.name}`);
+        } else {
+          unmatchedFiles.push(detected);
+          console.log(`[ChatGPT Saver] ❌ 未匹配: ${detected.name}`);
+        }
+      }
+      
+      // 如果有未匹配的文件，弹窗让用户选择
+      let userSelectedFiles = [];
+      if (unmatchedFiles.length > 0) {
+        console.log(`[ChatGPT Saver] ${unmatchedFiles.length} 个文件需要用户选择`);
+        UI.addLog(`⚠️ ${unmatchedFiles.length} 个附件需要手动选择`);
+        userSelectedFiles = await this.showAttachmentPicker(unmatchedFiles);
+      }
+      
+      // 合并所有要保存的文件
+      const filesToSave = [];
+      
+      // 添加自动匹配的文件
+      for (const { detected, matched } of matchedFiles) {
+        filesToSave.push(matched.file);
+      }
+      
+      // 添加用户选择的文件
+      for (const file of userSelectedFiles) {
+        if (file) {
+          filesToSave.push(file);
+        }
+      }
+      
+      if (filesToSave.length === 0) {
+        console.log('[ChatGPT Saver] 没有文件需要保存');
+        return;
+      }
+      
+      // 保存附件
+      await this.saveAttachmentFiles(safeWorkspace, safeTitle, filesToSave);
+    },
+    
+    // 从收集文件夹中查找匹配的文件（支持模糊匹配）
+    findMatchingFile(fileName) {
+      if (!this.collectionFiles || this.collectionFiles.length === 0) {
+        return null;
+      }
+      
+      // 清理文件名（去除可能的省略号等）
+      const cleanName = fileName.replace(/\.\.\.\s*$/, '').trim().toLowerCase();
+      
+      // 1. 精确匹配
+      let match = this.collectionFiles.find(f => 
+        f.name.toLowerCase() === cleanName
+      );
+      if (match) return match;
+      
+      // 2. 前缀匹配（处理被截断的文件名）
+      match = this.collectionFiles.find(f => 
+        f.name.toLowerCase().startsWith(cleanName) ||
+        cleanName.startsWith(f.name.toLowerCase().replace(/\.[^.]+$/, ''))  // 去掉扩展名比较
+      );
+      if (match) return match;
+      
+      // 3. 包含匹配
+      match = this.collectionFiles.find(f => 
+        f.name.toLowerCase().includes(cleanName) ||
+        cleanName.includes(f.name.toLowerCase().replace(/\.[^.]+$/, ''))
+      );
+      
+      return match;
+    },
+    
+    // 保存附件文件（到对话附件文件夹和收集文件夹）
+    async saveAttachmentFiles(safeWorkspace, safeTitle, files) {
+      try {
+        // 创建对话的 attachments 文件夹
+        const workspaceFolder = await Utils.getOrCreateFolder(savedFolderHandle, safeWorkspace);
+        const conversationFolder = await Utils.getOrCreateFolder(workspaceFolder, safeTitle);
+        const attachmentsFolder = await Utils.getOrCreateFolder(conversationFolder, 'attachments');
+        
+        let savedCount = 0;
+        let copiedToCollectionCount = 0;
+        
+        for (const file of files) {
+          if (!file) continue;
+          
+          // 1. 保存到对话的 attachments 文件夹
+          const success = await Utils.saveToFolder(attachmentsFolder, file.name, file, file.type);
+          if (success) {
+            savedCount++;
+            console.log(`[ChatGPT Saver] 附件已保存: ${file.name}`);
+            UI.addLog(`  📎 ${file.name}`);
+          }
+          
+          // 2. 同时复制到收集文件夹（如果已设置）
+          if (this.collectionFolderHandle) {
+            try {
+              // 检查文件是否已存在于收集文件夹
+              const existsInCollection = this.collectionFiles.some(
+                cf => cf.name.toLowerCase() === file.name.toLowerCase()
+              );
+              
+              if (!existsInCollection) {
+                const copySuccess = await Utils.saveToFolder(
+                  this.collectionFolderHandle, 
+                  file.name, 
+                  file, 
+                  file.type
+                );
+                if (copySuccess) {
+                  copiedToCollectionCount++;
+                  console.log(`[ChatGPT Saver] 附件已复制到收集文件夹: ${file.name}`);
+                  
+                  // 更新收集文件夹列表缓存
+                  this.collectionFiles.push({
+                    name: file.name,
+                    file: file,
+                    size: file.size,
+                    type: this.guessFileType(file.name),
+                    icon: this.getFileIcon(this.guessFileType(file.name))
+                  });
+                }
+              }
+            } catch (e) {
+              console.log(`[ChatGPT Saver] 复制到收集文件夹失败: ${e.message}`);
+            }
+          }
+        }
+        
+        if (savedCount > 0) {
+          let msg = `✅ 已保存 ${savedCount} 个附件`;
+          if (copiedToCollectionCount > 0) {
+            msg += `，${copiedToCollectionCount} 个新增到收集文件夹`;
+          }
+          UI.addLog(msg);
+          UI.showToast(msg, 'success', 3000);
+        }
+        
+      } catch (e) {
+        console.error('[ChatGPT Saver] 保存附件失败:', e);
+        UI.addLog(`❌ 附件保存失败: ${e.message}`);
+      }
     }
   };
 
@@ -1692,53 +1978,11 @@
       return result;
     },
     
-    // 检测并保存附件
+    // 检测并保存附件（复用 AttachmentManager.autoSaveAttachments）
     async detectAndSaveAttachments(safeWorkspace, safeTitle) {
       console.log('[ChatGPT Saver] ===== detectAndSaveAttachments 被调用 =====');
-      console.log('[ChatGPT Saver] safeWorkspace:', safeWorkspace, ', safeTitle:', safeTitle);
-      
-      // 扫描页面上的附件
-      const detectedFiles = AttachmentManager.scanAttachments();
-      
-      if (detectedFiles.length === 0) {
-        console.log('[ChatGPT Saver] 未检测到附件，跳过附件保存流程');
-        return;
-      }
-      
-      console.log(`[ChatGPT Saver] 检测到 ${detectedFiles.length} 个附件，弹出选择器`);
-      
-      // 弹出附件选择器让用户选择本地文件
-      const selectedFiles = await AttachmentManager.showAttachmentPicker(detectedFiles);
-      
-      if (selectedFiles.length === 0) {
-        console.log('[ChatGPT Saver] 用户跳过附件保存');
-        return;
-      }
-      
-      // 保存附件到 attachments 文件夹
-      try {
-        const workspaceFolder = await Utils.getOrCreateFolder(savedFolderHandle, safeWorkspace);
-        const conversationFolder = await Utils.getOrCreateFolder(workspaceFolder, safeTitle);
-        const attachmentsFolder = await Utils.getOrCreateFolder(conversationFolder, 'attachments');
-        
-        let savedCount = 0;
-        for (const file of selectedFiles) {
-          if (file) {
-            const success = await Utils.saveToFolder(attachmentsFolder, file.name, file, file.type);
-            if (success) {
-              savedCount++;
-              console.log(`[ChatGPT Saver] 附件已保存: ${file.name}`);
-            }
-          }
-        }
-        
-        if (savedCount > 0) {
-          UI.showToast(`✅ 已保存 ${savedCount} 个附件到 attachments 文件夹`, 'success', 3000);
-        }
-      } catch (e) {
-        console.error('[ChatGPT Saver] 保存附件失败:', e);
-        UI.showToast('⚠️ 附件保存失败', 'error', 3000);
-      }
+      // 复用 AttachmentManager 的自动保存功能（包含自动匹配和复制到收集文件夹）
+      await AttachmentManager.autoSaveAttachments(safeWorkspace, safeTitle);
     },
 
     // 导出单个文件（短对话）
@@ -2237,12 +2481,55 @@
         
         this.currentContextData = data;
         this.currentFileInfo = fileInfo;  // 保存文件信息，用于文件上传
+        
+        // 扫描该对话的附件文件夹
+        this.conversationAttachments = await this.scanConversationAttachments(fileInfo);
+        
         this.showContentPreview(data);
         
       } catch (e) {
         alert('读取文件失败: ' + e.message);
         console.error('[ChatGPT Saver] 读取上下文文件失败:', e);
       }
+    },
+    
+    // 扫描对话的 attachments 文件夹
+    async scanConversationAttachments(fileInfo) {
+      const attachments = [];
+      
+      try {
+        const workspaceHandle = await savedFolderHandle.getDirectoryHandle(fileInfo.workspace);
+        const convHandle = await workspaceHandle.getDirectoryHandle(fileInfo.conversation);
+        
+        let attachmentsFolder;
+        try {
+          attachmentsFolder = await convHandle.getDirectoryHandle('attachments', { create: false });
+        } catch (e) {
+          // 没有 attachments 文件夹
+          return [];
+        }
+        
+        for await (const entry of attachmentsFolder.values()) {
+          if (entry.kind === 'file') {
+            const file = await entry.getFile();
+            attachments.push({
+              name: file.name,
+              handle: entry,
+              file: file,
+              size: file.size,
+              selected: true  // 默认选中
+            });
+          }
+        }
+        
+        attachments.sort((a, b) => a.name.localeCompare(b.name));
+        console.log(`[ChatGPT Saver] 找到 ${attachments.length} 个附件文件`);
+        
+      } catch (e) {
+        console.error('[ChatGPT Saver] 扫描附件文件夹失败:', e);
+      }
+      
+      return attachments;
     },
 
     // 显示分片信息（索引文件）
@@ -2344,12 +2631,25 @@
       const confirmBtn = document.getElementById('saver-import-confirm');
       
       // 显示前几条消息预览
+      let previewText = '';
       const previewMessages = data.messages.slice(0, 3).map(m => 
         `[${m.role}] ${m.content.substring(0, 100)}${m.content.length > 100 ? '...' : ''}`
       ).join('\n\n');
       
-      previewEl.textContent = previewMessages + 
+      previewText = previewMessages + 
         (data.messages.length > 3 ? `\n\n... 还有 ${data.messages.length - 3} 条消息` : '');
+      
+      // 显示附件信息
+      if (this.conversationAttachments && this.conversationAttachments.length > 0) {
+        previewText += `\n\n📎 附件文件 (${this.conversationAttachments.length} 个):`;
+        this.conversationAttachments.forEach(att => {
+          const sizeKB = (att.size / 1024).toFixed(1);
+          previewText += `\n  ✅ ${att.name} (${sizeKB} KB)`;
+        });
+        previewText += `\n\n💡 这些附件将和 JSON 一起上传到新对话`;
+      }
+      
+      previewEl.textContent = previewText;
       
       // 显示元信息
       document.getElementById('saver-meta-title').textContent = data.title || '未知';
@@ -2369,10 +2669,26 @@
         document.getElementById('saver-import-meta').appendChild(tokensInfo);
       }
       
+      // 显示附件数量
+      if (this.conversationAttachments && this.conversationAttachments.length > 0) {
+        const attachInfo = document.createElement('div');
+        attachInfo.className = 'saver-import-meta-item';
+        attachInfo.innerHTML = `
+          <span class="saver-import-meta-label">附件</span>
+          <span class="saver-import-meta-value">${this.conversationAttachments.length} 个文件</span>
+        `;
+        document.getElementById('saver-import-meta').appendChild(attachInfo);
+      }
+      
       metaEl.style.display = 'block';
       optionsEl.style.display = 'block';
       confirmBtn.disabled = false;
-      confirmBtn.textContent = '作为附件导入';  // 改为文件上传
+      
+      // 根据是否有附件调整按钮文本
+      const attachCount = this.conversationAttachments?.length || 0;
+      confirmBtn.textContent = attachCount > 0 
+        ? `导入 JSON + ${attachCount} 个附件`
+        : '作为附件导入';
     },
 
     // 显示弹窗
@@ -2422,28 +2738,30 @@
       const shouldUploadAsFile = isChunk || this.currentFileInfo;  // 分片或有文件引用，就上传文件
       
       if (shouldUploadAsFile) {
-        const fileCount = isChunk && this.allChunkFiles ? this.allChunkFiles.length : 1;
-        console.log(`[ChatGPT Saver] 尝试上传 ${fileCount} 个 JSON 附件...`);
-        UI.showToast(`📎 正在上传 ${fileCount} 个 JSON 附件...`, 'saving', 0);
+        const jsonCount = isChunk && this.allChunkFiles ? this.allChunkFiles.length : 1;
+        const attachCount = this.conversationAttachments?.length || 0;
+        const totalCount = jsonCount + attachCount;
+        
+        console.log(`[ChatGPT Saver] 尝试上传 ${totalCount} 个文件 (${jsonCount} JSON + ${attachCount} 附件)...`);
+        UI.showToast(`📎 正在上传 ${totalCount} 个文件...`, 'saving', 0);
+        
         const uploadedCount = await this.uploadAsAttachment();
         
         if (uploadedCount) {
-          UI.showToast(`✅ 已上传 ${uploadedCount} 个 JSON 文件`, 'success', 3000);
+          UI.showToast(`✅ 已上传 ${uploadedCount} 个文件`, 'success', 3000);
           // 清理
           this.allChunkFiles = null;
-          
-          // 自动上传附件文件夹中的文件
-          await this.uploadAttachmentsIfExist();
+          this.conversationAttachments = null;
           
           // 注入预设提示词到输入框
-          await this.injectContextPrompt(data, fileCount);
+          await this.injectContextPrompt(data, jsonCount);
           
           if (autoSend) {
             setTimeout(() => this.triggerSend(), 1000);
           }
         } else {
           UI.hideToast();
-          alert('文件上传失败。请手动点击附件按钮上传 JSON 文件。');
+          alert('文件上传失败。请手动点击附件按钮上传文件。');
         }
       } else {
         // 降级方案：文本注入（通常不会走到这里）
@@ -2537,30 +2855,45 @@
       }
     },
     
-    // 上传为附件（支持批量上传所有分片）
+    // 上传为附件（支持批量上传 JSON + 附件）
     async uploadAsAttachment() {
       try {
-        // 检查是否有多个分片文件
         const filesToUpload = [];
         
+        // 1. 添加 JSON 文件
         if (this.allChunkFiles && this.allChunkFiles.length > 0) {
           // 批量上传所有分片
-          console.log(`[ChatGPT Saver] 批量上传 ${this.allChunkFiles.length} 个分片文件`);
+          console.log(`[ChatGPT Saver] 添加 ${this.allChunkFiles.length} 个分片文件`);
           for (const chunkFile of this.allChunkFiles) {
             const file = await chunkFile.handle.getFile();
             filesToUpload.push(file);
           }
         } else if (this.currentFileInfo && this.currentFileInfo.handle) {
-          // 单个文件
+          // 单个 JSON 文件
           const file = await this.currentFileInfo.handle.getFile();
           filesToUpload.push(file);
-        } else {
+        } else if (this.currentContextData) {
           // 从当前数据创建文件
           const jsonStr = JSON.stringify(this.currentContextData, null, 2);
           const blob = new Blob([jsonStr], { type: 'application/json' });
           const filename = `context_${this.currentContextData.title || 'import'}.json`;
           const file = new File([blob], filename, { type: 'application/json', lastModified: Date.now() });
           filesToUpload.push(file);
+        }
+        
+        // 2. 添加附件文件（如果有）
+        if (this.conversationAttachments && this.conversationAttachments.length > 0) {
+          console.log(`[ChatGPT Saver] 添加 ${this.conversationAttachments.length} 个附件文件`);
+          for (const att of this.conversationAttachments) {
+            if (att.selected !== false) {  // 默认选中或显式选中的
+              filesToUpload.push(att.file);
+            }
+          }
+        }
+        
+        if (filesToUpload.length === 0) {
+          console.error('[ChatGPT Saver] 没有文件可上传');
+          return false;
         }
         
         console.log(`[ChatGPT Saver] 尝试上传 ${filesToUpload.length} 个文件:`);
@@ -4405,6 +4738,11 @@ ${messagesContent}
             UI.showToast('✅ 已经成功保存啦', 'success', 3000);
             const count = GM_getValue('savedCount', 0) + 1;
             GM_setValue('savedCount', count);
+            
+            // 自动保存附件（检测页面上的附件并保存）
+            const safeWorkspace = Utils.sanitizeFileName(workspaceName);
+            const safeTitle = Utils.sanitizeFileName(title);
+            await AttachmentManager.autoSaveAttachments(safeWorkspace, safeTitle);
           } else {
             UI.logError(result.error || '保存失败');
             UI.hideToast();

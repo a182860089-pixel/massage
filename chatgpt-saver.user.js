@@ -1,14 +1,16 @@
 // ==UserScript==
 // @name         ChatGPT 对话保存助手
-// @namespace    https://github.com/chatgpt-saver
-// @version      1.0.1
-// @description  自动保存 ChatGPT 对话，支持导出为 HTML、Markdown、PDF 格式
+// @namespace    https://github.com/a182860089-pixel/massage
+// @version      2.1
+// @description  自动保存 ChatGPT 对话，支持导出为 HTML、Markdown、PDF 格式，支持上下文导出与导入
 // @author       ChatGPT Saver
 // @match        https://chat.openai.com/*
 // @match        https://chatgpt.com/*
 // @match        https://*.openai.com/*
 // @match        https://*.chatgpt.com/*
 // @icon         https://chat.openai.com/favicon.ico
+// @updateURL    https://raw.githubusercontent.com/a182860089-pixel/massage/main/chatgpt-saver.user.js
+// @downloadURL  https://raw.githubusercontent.com/a182860089-pixel/massage/main/chatgpt-saver.user.js
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addStyle
@@ -959,6 +961,532 @@
     }
   };
 
+  // ==================== 附件管理器 ====================
+  const AttachmentManager = {
+    attachmentModal: null,
+    detectedFiles: [],
+    selectedFiles: [],
+    resolveCallback: null,
+    collectionFolderHandle: null,  // 文件收集文件夹句柄
+    collectionFiles: [],  // 收集文件夹中的文件列表
+    
+    // 初始化：尝试恢复收集文件夹
+    async init() {
+      // 从 IndexedDB 恢复文件夹句柄
+      try {
+        const db = await Utils.openDB();
+        const handle = await new Promise((resolve) => {
+          const tx = db.transaction('fileHandles', 'readonly');
+          const store = tx.objectStore('fileHandles');
+          const request = store.get('collectionFolderHandle');
+          request.onsuccess = () => resolve(request.result || null);
+          request.onerror = () => resolve(null);
+        });
+        
+        if (handle) {
+          const permission = await handle.queryPermission({ mode: 'read' });
+          if (permission === 'granted') {
+            this.collectionFolderHandle = handle;
+            console.log('[ChatGPT Saver] 收集文件夹已恢复:', handle.name);
+          }
+        }
+      } catch (e) {
+        console.log('[ChatGPT Saver] 恢复收集文件夹失败:', e.message);
+      }
+    },
+    
+    // 选择收集文件夹
+    async selectCollectionFolder() {
+      if (!Utils.isFileSystemSupported()) {
+        alert('您的浏览器不支持文件夹选择功能');
+        return null;
+      }
+      try {
+        const handle = await window.showDirectoryPicker({ mode: 'read' });
+        this.collectionFolderHandle = handle;
+        
+        // 保存到 IndexedDB
+        const db = await Utils.openDB();
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction('fileHandles', 'readwrite');
+          const store = tx.objectStore('fileHandles');
+          store.put(handle, 'collectionFolderHandle');
+          tx.oncomplete = () => resolve(true);
+          tx.onerror = () => reject(tx.error);
+        });
+        
+        console.log('[ChatGPT Saver] 收集文件夹已设置:', handle.name);
+        return handle;
+      } catch (e) {
+        if (e.name !== 'AbortError') {
+          console.error('[ChatGPT Saver] 选择收集文件夹失败:', e);
+        }
+        return null;
+      }
+    },
+    
+    // 扫描收集文件夹中的文件
+    async scanCollectionFolder() {
+      if (!this.collectionFolderHandle) {
+        return [];
+      }
+      
+      const files = [];
+      try {
+        // 检查权限
+        const permission = await this.collectionFolderHandle.queryPermission({ mode: 'read' });
+        if (permission !== 'granted') {
+          const request = await this.collectionFolderHandle.requestPermission({ mode: 'read' });
+          if (request !== 'granted') {
+            console.log('[ChatGPT Saver] 收集文件夹权限被拒绝');
+            return [];
+          }
+        }
+        
+        for await (const entry of this.collectionFolderHandle.values()) {
+          if (entry.kind === 'file') {
+            const file = await entry.getFile();
+            files.push({
+              name: file.name,
+              handle: entry,
+              file: file,
+              size: file.size,
+              type: this.guessFileType(file.name),
+              icon: this.getFileIcon(this.guessFileType(file.name))
+            });
+          }
+        }
+        
+        // 按文件名排序
+        files.sort((a, b) => a.name.localeCompare(b.name));
+        console.log(`[ChatGPT Saver] 收集文件夹中有 ${files.length} 个文件`);
+      } catch (e) {
+        console.error('[ChatGPT Saver] 扫描收集文件夹失败:', e);
+      }
+      
+      this.collectionFiles = files;
+      return files;
+    },
+
+    // 扫描页面上的附件元素
+    scanAttachments() {
+      console.log('[ChatGPT Saver] ===== 开始扫描附件 =====');
+      const attachments = [];
+      
+      // 首先尝试通过消息内容区域查找附件
+      const userMessages = document.querySelectorAll('[data-message-author-role="user"]');
+      console.log(`[ChatGPT Saver] 找到 ${userMessages.length} 条用户消息`);
+      
+      for (const msgEl of userMessages) {
+        // 在每条用户消息中查找附件
+        // ChatGPT 附件通常包含在消息元素内部
+        const parent = msgEl.closest('[class*="group"]') || msgEl.parentElement?.parentElement;
+        if (parent) {
+          // 查找包含文件名的元素
+          const fileElements = parent.querySelectorAll('[class*="truncate"], [class*="overflow-hidden"], [class*="text-ellipsis"]');
+          for (const el of fileElements) {
+            const text = el.textContent?.trim();
+            // 检查是否像文件名（包含扩展名或特定模式）
+            if (text && text.length < 200 && (text.match(/\.[a-zA-Z0-9]{2,5}$/) || text.match(/\.[a-zA-Z0-9]{2,5}\.\.\./))) {
+              console.log(`[ChatGPT Saver] 通过消息区域找到可能的文件: "${text}"`);
+              const cleanName = text.replace(/\.\.\.\s*$/, '').trim();
+              if (cleanName && !attachments.some(a => a.name === cleanName)) {
+                attachments.push({
+                  name: cleanName,
+                  type: this.guessFileType(cleanName),
+                  icon: this.getFileIcon(this.guessFileType(cleanName))
+                });
+              }
+            }
+          }
+        }
+      }
+      
+      // 查找所有可能的附件元素
+      const selectors = [
+        '[data-testid="attachment"]',
+        '[data-testid="file-thumbnail"]',
+        '[class*="attachment"]',
+        '[class*="file"][class*="preview"]',
+        'img[src*="files.oaiusercontent.com"]',
+        'a[href*="/mnt/data/"]',
+        'a[download]',
+        // 更多 ChatGPT 文件相关选择器
+        '[data-testid*="file"]',
+        '[aria-label*="file"]',
+        '[aria-label*="文件"]',
+        '.uploaded-file',
+        '[class*="upload"]',
+        // 新增：文档图标相关
+        '[class*="document"]',
+        'button[class*="group"]',
+        // 查找包含文件名模式的元素
+        '[title*="."]'
+      ];
+      
+      for (const selector of selectors) {
+        try {
+          const elements = document.querySelectorAll(selector);
+          console.log(`[ChatGPT Saver] 选择器 "${selector}" 找到 ${elements.length} 个元素`);
+          for (const el of elements) {
+            console.log(`[ChatGPT Saver]   - 元素:`, el.tagName, el.className?.substring(0, 50), el.getAttribute('data-testid'));
+            const attachment = this.parseAttachmentElement(el);
+            if (attachment) {
+              console.log(`[ChatGPT Saver]   → 解析到文件: ${attachment.name}`);
+              if (!attachments.some(a => a.name === attachment.name)) {
+                attachments.push(attachment);
+              }
+            }
+          }
+        } catch (e) {
+          console.log(`[ChatGPT Saver] 选择器 "${selector}" 错误:`, e.message);
+        }
+      }
+      
+      console.log(`[ChatGPT Saver] ===== 扫描完成，共 ${attachments.length} 个附件 =====`);
+      if (attachments.length > 0) {
+        console.log('[ChatGPT Saver] 附件列表:', attachments.map(a => a.name));
+      }
+      return attachments;
+    },
+    
+    // 解析附件元素
+    parseAttachmentElement(element) {
+      // 尝试从不同属性提取文件名
+      let filename = null;
+      let fileType = 'unknown';
+      
+      // 从 download 属性
+      if (element.hasAttribute('download')) {
+        filename = element.getAttribute('download');
+      }
+      
+      // 从 alt 或 title
+      if (!filename) {
+        filename = element.getAttribute('alt') || element.getAttribute('title');
+      }
+      
+      // 从 href 或 src
+      if (!filename) {
+        const url = element.getAttribute('href') || element.getAttribute('src');
+        if (url) {
+          const match = url.match(/\/([^\/]+\.[a-zA-Z0-9]{2,5})(?:\?|$)/);
+          if (match) filename = match[1];
+        }
+      }
+      
+      // 从内部文本
+      if (!filename) {
+        const textContent = element.textContent?.trim();
+        if (textContent && textContent.length < 100 && textContent.match(/\.[a-zA-Z0-9]{2,5}$/)) {
+          filename = textContent;
+        }
+      }
+      
+      if (!filename) return null;
+      
+      // 清理文件名（去除末尾的 ... 等）
+      filename = filename.replace(/\.\.\.\s*$/, '').trim();
+      
+      // 识别文件类型
+      const ext = filename.split('.').pop()?.toLowerCase();
+      if (['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(ext)) {
+        fileType = 'image';
+      } else if (['pdf'].includes(ext)) {
+        fileType = 'pdf';
+      } else if (['txt', 'md', 'json', 'csv'].includes(ext)) {
+        fileType = 'document';
+      } else if (['zip', 'rar', '7z'].includes(ext)) {
+        fileType = 'archive';
+      } else if (['py', 'js', 'java', 'cpp', 'ts'].includes(ext)) {
+        fileType = 'code';
+      }
+      
+      return {
+        name: filename,
+        type: fileType,
+        icon: this.getFileIcon(fileType)
+      };
+    },
+    
+    // 获取文件图标
+    getFileIcon(fileType) {
+      const icons = {
+        image: '🖼️',
+        pdf: '📕',
+        document: '📄',
+        archive: '📦',
+        code: '💻',
+        unknown: '📎'
+      };
+      return icons[fileType] || icons.unknown;
+    },
+    
+    // 根据文件名猜测文件类型
+    guessFileType(filename) {
+      if (!filename) return 'unknown';
+      const ext = filename.split('.').pop()?.toLowerCase();
+      if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(ext)) {
+        return 'image';
+      } else if (['pdf'].includes(ext)) {
+        return 'pdf';
+      } else if (['txt', 'md', 'json', 'csv', 'doc', 'docx', 'xls', 'xlsx'].includes(ext)) {
+        return 'document';
+      } else if (['zip', 'rar', '7z', 'tar', 'gz'].includes(ext)) {
+        return 'archive';
+      } else if (['py', 'js', 'java', 'cpp', 'ts', 'html', 'css', 'c', 'h'].includes(ext)) {
+        return 'code';
+      }
+      return 'unknown';
+    },
+    
+    // 显示附件选择器弹窗
+    async showAttachmentPicker(detectedFiles) {
+      return new Promise(async (resolve) => {
+        this.detectedFiles = detectedFiles;
+        this.selectedFiles = [];
+        this.resolveCallback = resolve;
+        
+        // 扫描收集文件夹
+        await this.scanCollectionFolder();
+        
+        this.createAttachmentModal();
+        this.renderFileList();
+        this.attachmentModal.classList.add('show');
+      });
+    },
+    
+    // 创建附件选择器弹窗
+    createAttachmentModal() {
+      if (this.attachmentModal) {
+        // 已存在，只更新内容
+        return;
+      }
+      
+      const modal = document.createElement('div');
+      modal.className = 'saver-attachment-modal';
+      modal.innerHTML = `
+        <div class="saver-attachment-dialog">
+          <div class="saver-attachment-header">
+            <h3>📎 保存附件文件</h3>
+            <p>检测到对话中的附件，请选择本地源文件一起保存</p>
+          </div>
+          <div class="saver-attachment-content">
+            <!-- 收集文件夹区域 -->
+            <div id="saver-collection-area" class="saver-collection-area">
+              <div class="saver-collection-header">
+                <span>📂 收集文件夹</span>
+                <button class="saver-collection-set-btn" id="saver-set-collection">设置文件夹</button>
+              </div>
+              <div id="saver-collection-files" class="saver-collection-files"></div>
+            </div>
+            
+            <!-- 检测到的附件列表 -->
+            <div class="saver-detected-header">检测到的附件：</div>
+            <div id="saver-attachment-list"></div>
+            
+            <div class="saver-attachment-hint">
+              💡 <strong>提示：</strong><br/>
+              • 建议将常用附件放到「收集文件夹」，可快速选择<br/>
+              • 也可以点击「浏览...」从任意位置选择文件<br/>
+              • Windows 搜索：按 Win 键，输入文件名即可查找
+            </div>
+          </div>
+          <div class="saver-attachment-footer">
+            <button class="saver-import-btn secondary" id="saver-attach-skip">跳过</button>
+            <button class="saver-import-btn primary" id="saver-attach-confirm" disabled>保存已选文件</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(modal);
+      this.attachmentModal = modal;
+      
+      // 绑定事件
+      modal.querySelector('#saver-attach-skip').onclick = () => this.closeModal([]);
+      modal.querySelector('#saver-attach-confirm').onclick = () => this.closeModal(this.selectedFiles);
+      modal.querySelector('#saver-set-collection').onclick = () => this.handleSetCollectionFolder();
+      modal.onclick = (e) => {
+        if (e.target === modal) this.closeModal([]);
+      };
+    },
+    
+    // 设置收集文件夹
+    async handleSetCollectionFolder() {
+      const handle = await this.selectCollectionFolder();
+      if (handle) {
+        await this.scanCollectionFolder();
+        this.renderCollectionFiles();
+        UI.showToast(`✅ 收集文件夹已设置: ${handle.name}`, 'success', 3000);
+      }
+    },
+    
+    // 渲染收集文件夹中的文件
+    renderCollectionFiles() {
+      const container = document.getElementById('saver-collection-files');
+      if (!container) return;
+      
+      if (!this.collectionFolderHandle) {
+        container.innerHTML = `
+          <div class="saver-collection-empty">
+            未设置收集文件夹。请点击上方「设置文件夹」按钮选择一个文件夹。
+          </div>
+        `;
+        return;
+      }
+      
+      if (this.collectionFiles.length === 0) {
+        container.innerHTML = `
+          <div class="saver-collection-empty">
+            📂 ${this.collectionFolderHandle.name}<br/>
+            <span style="font-size: 11px; opacity: 0.7;">文件夹为空，请先将附件文件复制到该文件夹</span>
+          </div>
+        `;
+        return;
+      }
+      
+      container.innerHTML = `
+        <div class="saver-collection-folder-name">📂 ${this.collectionFolderHandle.name}</div>
+        <div class="saver-collection-list">
+          ${this.collectionFiles.map((file, index) => `
+            <div class="saver-collection-file" data-index="${index}" title="点击选择此文件">
+              <span class="saver-collection-file-icon">${file.icon}</span>
+              <span class="saver-collection-file-name">${file.name}</span>
+              <span class="saver-collection-file-size">${this.formatFileSize(file.size)}</span>
+            </div>
+          `).join('')}
+        </div>
+      `;
+      
+      // 绑定点击事件
+      container.querySelectorAll('.saver-collection-file').forEach(el => {
+        el.addEventListener('click', () => {
+          const index = parseInt(el.dataset.index);
+          const file = this.collectionFiles[index];
+          if (file) {
+            this.selectCollectionFile(file);
+          }
+        });
+      });
+    },
+    
+    // 选择收集文件夹中的文件
+    selectCollectionFile(collectionFile) {
+      // 找到第一个未选择的附件槽位
+      let targetIndex = this.selectedFiles.findIndex((f, i) => f === undefined && i < this.detectedFiles.length);
+      if (targetIndex === -1) {
+        // 所有槽位都已填充，替换第一个
+        targetIndex = 0;
+      }
+      
+      // 设置文件
+      this.handleFileSelected(targetIndex, collectionFile.file);
+      
+      // 高亮显示已选择
+      const collectionFileEl = document.querySelector(`.saver-collection-file[data-index="${this.collectionFiles.indexOf(collectionFile)}"]`);
+      if (collectionFileEl) {
+        collectionFileEl.classList.add('selected');
+      }
+    },
+    
+    // 格式化文件大小
+    formatFileSize(bytes) {
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    },
+    
+    // 渲染文件列表
+    renderFileList() {
+      // 先渲染收集文件夹
+      this.renderCollectionFiles();
+      
+      const listEl = document.getElementById('saver-attachment-list');
+      if (!listEl) return;
+      
+      if (this.detectedFiles.length === 0) {
+        listEl.innerHTML = '<div style="text-align: center; padding: 20px; color: #888;">未检测到附件</div>';
+        return;
+      }
+      
+      listEl.innerHTML = this.detectedFiles.map((file, index) => `
+        <div class="saver-attachment-item" data-index="${index}">
+          <span class="saver-attach-icon">${file.icon}</span>
+          <span class="saver-attach-name" title="${file.name}">${file.name}</span>
+          <input type="file" class="saver-attach-input" id="saver-attach-file-${index}" style="display: none;" />
+          <button class="saver-attach-select-btn" data-index="${index}">浏览...</button>
+          <button class="saver-attach-copy-btn" data-name="${file.name}" title="复制文件名用于搜索">📋</button>
+          <span class="saver-attach-status" id="saver-attach-status-${index}">未选择</span>
+        </div>
+      `).join('');
+      
+      // 绑定选择按钮事件
+      listEl.querySelectorAll('.saver-attach-select-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          const index = parseInt(e.target.dataset.index);
+          this.triggerFileSelect(index);
+        });
+      });
+      
+      // 绑定复制按钮事件
+      listEl.querySelectorAll('.saver-attach-copy-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          const name = e.target.dataset.name;
+          navigator.clipboard.writeText(name).then(() => {
+            UI.showToast(`✅ 已复制文件名: ${name}`, 'success', 2000);
+          });
+        });
+      });
+      
+      // 绑定文件输入事件
+      listEl.querySelectorAll('.saver-attach-input').forEach((input, index) => {
+        input.addEventListener('change', (e) => {
+          this.handleFileSelected(index, e.target.files[0]);
+        });
+      });
+    },
+    
+    // 触发文件选择
+    triggerFileSelect(index) {
+      const input = document.getElementById(`saver-attach-file-${index}`);
+      if (input) input.click();
+    },
+    
+    // 处理文件选择
+    handleFileSelected(index, file) {
+      if (!file) return;
+      
+      // 更新已选文件列表
+      this.selectedFiles[index] = file;
+      
+      // 更新状态显示
+      const statusEl = document.getElementById(`saver-attach-status-${index}`);
+      if (statusEl) {
+        statusEl.textContent = `✅ ${file.name}`;
+        statusEl.style.color = '#10a37f';
+      }
+      
+      // 检查是否至少选择了一个文件
+      const hasSelected = this.selectedFiles.some(f => f !== undefined);
+      const confirmBtn = document.getElementById('saver-attach-confirm');
+      if (confirmBtn) {
+        confirmBtn.disabled = !hasSelected;
+      }
+    },
+    
+    // 关闭弹窗
+    closeModal(selectedFiles) {
+      if (this.attachmentModal) {
+        this.attachmentModal.classList.remove('show');
+      }
+      if (this.resolveCallback) {
+        // 过滤掉未选择的文件
+        const files = selectedFiles.filter(f => f !== undefined);
+        this.resolveCallback(files);
+        this.resolveCallback = null;
+      }
+    }
+  };
+
   // ==================== 上下文 JSON 导出器 ====================
   const ContextExporter = {
     // 分片配置
@@ -1124,9 +1652,12 @@
 
     // 导出为 JSON 文件（支持智能分片）
     async export() {
+      // 点击后立即显示提示
+      UI.showToast('⏳ 正在导出上下文...', 'info', 0);
+      
       const conversation = Parser.parseConversation();
       if (!conversation.messages.length) {
-        alert('没有找到可导出的对话内容');
+        UI.showToast('⚠️ 没有找到可导出的对话内容', 'error', 3000);
         return null;
       }
 
@@ -1139,10 +1670,67 @@
       const { MAX_TOKENS_PER_CHUNK } = this.CHUNK_CONFIG;
       const needsChunking = contextData.totalTokens > MAX_TOKENS_PER_CHUNK || contextData.messageCount > 25;
       
+      let result;
       if (needsChunking) {
-        return await this.exportChunked(contextData, safeWorkspace, safeTitle);
+        result = await this.exportChunked(contextData, safeWorkspace, safeTitle);
       } else {
-        return await this.exportSingle(contextData, safeWorkspace, safeTitle);
+        result = await this.exportSingle(contextData, safeWorkspace, safeTitle);
+      }
+      
+      // 导出完成后，检测并保存附件
+      if (result && CONFIG.saveMode === 'folder' && savedFolderHandle) {
+        await this.detectAndSaveAttachments(safeWorkspace, safeTitle);
+      }
+      
+      return result;
+    },
+    
+    // 检测并保存附件
+    async detectAndSaveAttachments(safeWorkspace, safeTitle) {
+      console.log('[ChatGPT Saver] ===== detectAndSaveAttachments 被调用 =====');
+      console.log('[ChatGPT Saver] safeWorkspace:', safeWorkspace, ', safeTitle:', safeTitle);
+      
+      // 扫描页面上的附件
+      const detectedFiles = AttachmentManager.scanAttachments();
+      
+      if (detectedFiles.length === 0) {
+        console.log('[ChatGPT Saver] 未检测到附件，跳过附件保存流程');
+        return;
+      }
+      
+      console.log(`[ChatGPT Saver] 检测到 ${detectedFiles.length} 个附件，弹出选择器`);
+      
+      // 弹出附件选择器让用户选择本地文件
+      const selectedFiles = await AttachmentManager.showAttachmentPicker(detectedFiles);
+      
+      if (selectedFiles.length === 0) {
+        console.log('[ChatGPT Saver] 用户跳过附件保存');
+        return;
+      }
+      
+      // 保存附件到 attachments 文件夹
+      try {
+        const workspaceFolder = await Utils.getOrCreateFolder(savedFolderHandle, safeWorkspace);
+        const conversationFolder = await Utils.getOrCreateFolder(workspaceFolder, safeTitle);
+        const attachmentsFolder = await Utils.getOrCreateFolder(conversationFolder, 'attachments');
+        
+        let savedCount = 0;
+        for (const file of selectedFiles) {
+          if (file) {
+            const success = await Utils.saveToFolder(attachmentsFolder, file.name, file, file.type);
+            if (success) {
+              savedCount++;
+              console.log(`[ChatGPT Saver] 附件已保存: ${file.name}`);
+            }
+          }
+        }
+        
+        if (savedCount > 0) {
+          UI.showToast(`✅ 已保存 ${savedCount} 个附件到 attachments 文件夹`, 'success', 3000);
+        }
+      } catch (e) {
+        console.error('[ChatGPT Saver] 保存附件失败:', e);
+        UI.showToast('⚠️ 附件保存失败', 'error', 3000);
       }
     },
 
@@ -1836,6 +2424,13 @@
           UI.showToast(`✅ 已上传 ${uploadedCount} 个 JSON 文件`, 'success', 3000);
           // 清理
           this.allChunkFiles = null;
+          
+          // 自动上传附件文件夹中的文件
+          await this.uploadAttachmentsIfExist();
+          
+          // 注入预设提示词到输入框
+          await this.injectContextPrompt(data, fileCount);
+          
           if (autoSend) {
             setTimeout(() => this.triggerSend(), 1000);
           }
@@ -1858,6 +2453,80 @@
           UI.hideToast();
           alert('导入失败，请手动复制粘贴上下文内容');
         }
+      }
+    },
+    
+    // 注入预设提示词到输入框
+    async injectContextPrompt(data, fileCount) {
+      try {
+        const input = await this.findInputElement();
+        if (!input) {
+          console.warn('[ChatGPT Saver] 未找到输入框，无法注入提示词');
+          return;
+        }
+        
+        // 构建预设提示词
+        const promptText = this.buildContextPrompt(data, fileCount);
+        
+        if (input.tagName === 'TEXTAREA') {
+          // 设置值
+          input.value = promptText;
+          
+          // 触发多种事件确保 React 感知
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+          
+          // 尝试触发 React 的合成事件
+          const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+            window.HTMLTextAreaElement.prototype, 'value'
+          ).set;
+          nativeInputValueSetter.call(input, promptText);
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          
+        } else if (input.getAttribute('contenteditable') === 'true') {
+          input.innerText = promptText;
+          input.dispatchEvent(new InputEvent('input', { 
+            bubbles: true, 
+            inputType: 'insertText',
+            data: promptText 
+          }));
+        }
+        
+        input.focus();
+        console.log('[ChatGPT Saver] 已注入预设提示词');
+        
+      } catch (e) {
+        console.error('[ChatGPT Saver] 注入提示词失败:', e);
+      }
+    },
+    
+    // 构建上下文导入的预设提示词
+    buildContextPrompt(data, fileCount) {
+      const title = data.title || '未知对话';
+      const messageCount = data.messageCount || data.messages?.length || 0;
+      const isChunked = data.type === 'chunk' || fileCount > 1;
+      
+      // 根据是否分片构建不同的提示词
+      if (isChunked) {
+        return `我已上传了 ${fileCount} 个 JSON 文件，这是之前对话「${title}」的上下文记录（共 ${data.original?.totalMessages || messageCount} 条消息）。
+
+请你：
+1. 仔细阅读这些 JSON 文件中的对话内容
+2. 理解对话的主题、背景和我们讨论的要点
+3. 简要总结对话的核心内容（用 3-5 个要点）
+4. 然后告诉我你已准备好继续这个对话
+
+注意：请基于文件中的实际内容来理解，而不是猜测。`;
+      } else {
+        return `我已上传了一个 JSON 文件，这是之前对话「${title}」的上下文记录（共 ${messageCount} 条消息）。
+
+请你：
+1. 仔细阅读这个 JSON 文件中的对话内容
+2. 理解对话的主题、背景和我们讨论的要点
+3. 简要总结对话的核心内容（用 3-5 个要点）
+4. 然后告诉我你已准备好继续这个对话
+
+注意：请基于文件中的实际内容来理解，而不是猜测。`;
       }
     },
     
@@ -1927,6 +2596,90 @@
       } catch (e) {
         console.error('[ChatGPT Saver] uploadAsAttachment 错误:', e);
         return false;
+      }
+    },
+    
+    // 自动上传附件文件夹中的文件
+    async uploadAttachmentsIfExist() {
+      // 检查是否有文件信息
+      if (!this.currentFileInfo) {
+        console.log('[ChatGPT Saver] 没有文件信息，跳过附件上传');
+        return;
+      }
+      
+      try {
+        // 获取 attachments 文件夹
+        const workspaceHandle = await savedFolderHandle.getDirectoryHandle(this.currentFileInfo.workspace);
+        const convHandle = await workspaceHandle.getDirectoryHandle(this.currentFileInfo.conversation);
+        
+        let attachmentsFolder;
+        try {
+          attachmentsFolder = await convHandle.getDirectoryHandle('attachments', { create: false });
+        } catch (e) {
+          console.log('[ChatGPT Saver] 没有 attachments 文件夹，跳过');
+          return;
+        }
+        
+        // 扫描 attachments 文件夹中的文件
+        const attachmentFiles = [];
+        for await (const entry of attachmentsFolder.values()) {
+          if (entry.kind === 'file') {
+            attachmentFiles.push(entry);
+          }
+        }
+        
+        if (attachmentFiles.length === 0) {
+          console.log('[ChatGPT Saver] attachments 文件夹为空');
+          return;
+        }
+        
+        console.log(`[ChatGPT Saver] 发现 ${attachmentFiles.length} 个附件文件，准备上传`);
+        UI.showToast(`📎 正在上传 ${attachmentFiles.length} 个附件文件...`, 'saving', 0);
+        
+        // 等待上一次上传完成
+        await this.sleep(1000);
+        
+        // 加载所有附件文件
+        const filesToUpload = [];
+        for (const fileHandle of attachmentFiles) {
+          const file = await fileHandle.getFile();
+          filesToUpload.push(file);
+        }
+        
+        // 查找 ChatGPT 的文件输入
+        const fileInputs = document.querySelectorAll('input[type="file"]');
+        let targetInput = null;
+        for (const input of fileInputs) {
+          if (input.id !== 'saver-file-input') {
+            targetInput = input;
+            break;
+          }
+        }
+        
+        if (!targetInput) {
+          console.error('[ChatGPT Saver] 未找到文件输入框');
+          return;
+        }
+        
+        // 创建 DataTransfer 并添加所有文件
+        const dataTransfer = new DataTransfer();
+        for (const file of filesToUpload) {
+          dataTransfer.items.add(file);
+          console.log(`[ChatGPT Saver] 添加附件: ${file.name}`);
+        }
+        targetInput.files = dataTransfer.files;
+        
+        // 触发事件
+        targetInput.dispatchEvent(new Event('change', { bubbles: true }));
+        targetInput.dispatchEvent(new Event('input', { bubbles: true }));
+        
+        await this.sleep(500);
+        
+        UI.showToast(`✅ 已上传 ${attachmentFiles.length} 个附件文件`, 'success', 3000);
+        console.log(`[ChatGPT Saver] ${attachmentFiles.length} 个附件文件上传完成`);
+        
+      } catch (e) {
+        console.error('[ChatGPT Saver] 上传附件失败:', e);
       }
     },
 
@@ -2344,14 +3097,70 @@ ${messagesContent}
     }
   };
 
-  // Logo SVG (简洁的对话/文档保存图标)
-  const LOGO_SVG = `<svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <circle cx="20" cy="20" r="20" fill="#10a37f"/>
-    <rect x="12" y="12" width="16" height="3" rx="1.5" fill="white"/>
-    <rect x="12" y="17" width="16" height="3" rx="1.5" fill="white"/>
-    <rect x="12" y="22" width="10" height="3" rx="1.5" fill="white"/>
-    <path d="M24 25l3 3 5-5" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-  </svg>`;
+  // 小鹿图标（内联 SVG，支持动画）
+  const DEER_ICON_SVG = `
+    <svg class="saver-deer-icon" viewBox="0 -5 50 65" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <linearGradient id="faceGrad" x1="50%" y1="0%" x2="50%" y2="100%">
+          <stop offset="0%" stop-color="#B8E4F9"/>
+          <stop offset="100%" stop-color="#8DD0F0"/>
+        </linearGradient>
+        <linearGradient id="antlerGrad" x1="50%" y1="0%" x2="50%" y2="100%">
+          <stop offset="0%" stop-color="#E8C896"/>
+          <stop offset="100%" stop-color="#D4A86A"/>
+        </linearGradient>
+      </defs>
+      <!-- 左鹿角 -->
+      <path d="M11 16 Q 8 10 9 3 Q 10 -2 13 0 Q 15 2 14 8 L 14 11 Q 17 6 20 8 Q 22 10 18 14 Q 16 17 14 18 Z" fill="url(#antlerGrad)"/>
+      <!-- 右鹿角 -->
+      <path d="M39 16 Q 42 10 41 3 Q 40 -2 37 0 Q 35 2 36 8 L 36 11 Q 33 6 30 8 Q 28 10 32 14 Q 34 17 36 18 Z" fill="url(#antlerGrad)"/>
+      <!-- 左耳朵 -->
+      <ellipse cx="4" cy="32" rx="5" ry="7" fill="#9DD5F3" stroke="#5B9FC7" stroke-width="1"/>
+      <ellipse cx="4.5" cy="32" rx="2.5" ry="4.5" fill="#B8E4F9"/>
+      <!-- 右耳朵 -->
+      <ellipse cx="46" cy="32" rx="5" ry="7" fill="#9DD5F3" stroke="#5B9FC7" stroke-width="1"/>
+      <ellipse cx="45.5" cy="32" rx="2.5" ry="4.5" fill="#B8E4F9"/>
+      <!-- 脸 -->
+      <circle cx="25" cy="35" r="23" fill="url(#faceGrad)" stroke="#5B9FC7" stroke-width="1.5"/>
+      <!-- 左眼（开着） -->
+      <g class="deer-eye-left">
+        <ellipse cx="17" cy="36" rx="5" ry="5.5" fill="#3D5A6E"/>
+        <ellipse cx="17" cy="36" rx="4" ry="4.5" fill="#2C4356"/>
+        <circle cx="15.5" cy="34.5" r="2.2" fill="white"/>
+        <circle cx="18" cy="37.5" r="1" fill="white" opacity="0.6"/>
+      </g>
+      <!-- 左眼（闭着 - 用于眨眼） -->
+      <path class="deer-eye-left-closed" d="M12 36 Q17 38 22 36" stroke="#2C4356" stroke-width="2" fill="none" stroke-linecap="round" style="display:none;"/>
+      <!-- 右眼（开着） -->
+      <g class="deer-eye-right">
+        <ellipse cx="33" cy="36" rx="5" ry="5.5" fill="#3D5A6E"/>
+        <ellipse cx="33" cy="36" rx="4" ry="4.5" fill="#2C4356"/>
+        <circle cx="31.5" cy="34.5" r="2.2" fill="white"/>
+        <circle cx="34" cy="37.5" r="1" fill="white" opacity="0.6"/>
+      </g>
+      <!-- 右眼（闭着 - 用于眨眼） -->
+      <path class="deer-eye-right-closed" d="M28 36 Q33 38 38 36" stroke="#2C4356" stroke-width="2" fill="none" stroke-linecap="round" style="display:none;"/>
+      <!-- 鼻子 -->
+      <ellipse cx="25" cy="44" rx="2.8" ry="2" fill="#3D5A6E"/>
+      <ellipse cx="24.5" cy="43.5" rx="1" ry="0.6" fill="white" opacity="0.4"/>
+      <!-- 嘴巴（普通微笑） -->
+      <path class="deer-mouth" d="M22 47 Q25 50 28 47" stroke="#3D5A6E" stroke-width="1.3" fill="none" stroke-linecap="round"/>
+      <!-- 嘴巴（开心大笑 - 隐藏） -->
+      <path class="deer-mouth-happy" d="M20 46 Q25 53 30 46" stroke="#3D5A6E" stroke-width="1.5" fill="none" stroke-linecap="round" style="display:none;"/>
+      <!-- 腮红 -->
+      <ellipse class="deer-blush-left" cx="9" cy="42" rx="3.5" ry="2.2" fill="#F5A9B8" opacity="0.45"/>
+      <ellipse class="deer-blush-right" cx="41" cy="42" rx="3.5" ry="2.2" fill="#F5A9B8" opacity="0.45"/>
+      <!-- 额头代码标记 -->
+      <text x="25" y="27" font-size="7" fill="white" text-anchor="middle" font-family="Consolas,monospace" font-weight="bold" opacity="0.85">&lt;/&gt;</text>
+    </svg>
+  `;
+
+  // 保留旧变量名兼容
+  const DEER_ICON_URL = 'data:image/svg+xml,' + encodeURIComponent('<svg viewBox="0 0 50 60"></svg>');
+  const FACE_IMG_URL = DEER_ICON_URL;
+  const ANTLERS_IMG_URL = DEER_ICON_URL;
+  const LOGO_IMG_URL = DEER_ICON_URL;
+  const LOGO_SVG = DEER_ICON_SVG;
 
   // ==================== UI 面板 ====================
   const UI = {
@@ -2420,29 +3229,55 @@ ${messagesContent}
         }
 
         #chatgpt-saver-btn {
-          position: fixed; bottom: 20px; right: 20px; width: 50px; height: 50px;
+          position: fixed; bottom: 20px; right: 20px; width: 50px; height: 65px;
           background: transparent;
-          border: none; border-radius: 50%; cursor: pointer; z-index: 10002;
-          box-shadow: 0 4px 12px rgba(16, 163, 127, 0.4);
-          display: flex; align-items: center; justify-content: center;
+          border: none; cursor: grab; z-index: 99999;
+          box-shadow: none;
+          display: flex; align-items: flex-end; justify-content: center;
           transition: transform 0.2s;
-          padding: 0; overflow: hidden;
+          padding: 0;
+          overflow: visible;
+          user-select: none;
+          touch-action: none;
         }
-        #chatgpt-saver-btn svg {
-          width: 100%; height: 100%;
+        #chatgpt-saver-btn.dragging {
+          cursor: grabbing;
+          transform: scale(1.1);
+          transition: none;
+          z-index: 99999 !important; /* 拖动时提升到最高层，防止被遮挡 */
         }
-        #chatgpt-saver-btn:hover { transform: scale(1.1); }
+        #chatgpt-saver-btn .saver-deer-icon {
+          width: 50px;
+          height: 65px;
+          pointer-events: none;
+          filter: drop-shadow(0 3px 8px rgba(135, 206, 235, 0.5));
+          animation: deerBounce 2.5s ease-in-out infinite;
+        }
+        #chatgpt-saver-btn:hover:not(.dragging) { transform: scale(1.1); }
+        #chatgpt-saver-btn:hover .saver-deer-icon { animation: deerWiggle 0.5s ease-in-out infinite; }
+        #chatgpt-saver-btn.dragging .saver-deer-icon { animation: none; }
+        
+        @keyframes deerBounce {
+          0%, 100% { transform: translateY(0); }
+          50% { transform: translateY(-3px); }
+        }
+        @keyframes deerWiggle {
+          0%, 100% { transform: rotate(0deg); }
+          25% { transform: rotate(-5deg); }
+          75% { transform: rotate(5deg); }
+        }
 
         /* Toast 通知样式 */
         #chatgpt-saver-toast {
-          position: fixed; bottom: 80px; right: 20px;
+          position: fixed;
           background: rgba(0, 0, 0, 0.85); color: white;
           padding: 10px 16px; border-radius: 8px;
           font-size: 13px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-          z-index: 10000; opacity: 0; transform: translateY(10px);
-          transition: all 0.3s ease; pointer-events: none;
+          z-index: 99998; opacity: 0; transform: translateY(10px);
+          transition: opacity 0.3s ease, transform 0.3s ease; pointer-events: none;
           max-width: 220px; text-align: center;
           box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+          white-space: nowrap;
         }
         #chatgpt-saver-toast.show {
           opacity: 1; transform: translateY(0);
@@ -2610,6 +3445,123 @@ ${messagesContent}
         /* 隐藏的文件选择器 */
         #saver-file-input { display: none; }
         
+        /* 附件选择器弹窗 */
+        .saver-attachment-modal {
+          position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+          background: rgba(0, 0, 0, 0.6); z-index: 10006;
+          display: flex; align-items: center; justify-content: center;
+          opacity: 0; visibility: hidden; transition: all 0.3s ease;
+        }
+        .saver-attachment-modal.show { opacity: 1; visibility: visible; }
+        
+        .saver-attachment-dialog {
+          background: var(--saver-bg); border-radius: 16px; width: 90%; max-width: 600px;
+          max-height: 80vh; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+          display: flex; flex-direction: column;
+          border: 1px solid var(--saver-border);
+        }
+        
+        .saver-attachment-header {
+          padding: 20px; background: var(--saver-header-bg);
+          color: var(--saver-header-text);
+        }
+        .saver-attachment-header h3 { margin: 0 0 4px 0; font-size: 18px; font-weight: 600; }
+        .saver-attachment-header p { margin: 0; font-size: 13px; opacity: 0.7; }
+        
+        .saver-attachment-content { padding: 20px; overflow-y: auto; flex: 1; }
+        
+        #saver-attachment-list { margin-bottom: 16px; }
+        
+        .saver-attachment-item {
+          display: flex; align-items: center; gap: 12px; padding: 12px;
+          background: var(--saver-format-bg); border-radius: 8px; margin-bottom: 8px;
+          border: 1px solid var(--saver-border);
+        }
+        .saver-attach-icon { font-size: 20px; }
+        .saver-attach-name { flex: 1; font-size: 13px; color: var(--saver-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .saver-attach-select-btn {
+          padding: 6px 12px; border-radius: 6px; font-size: 12px; border: none;
+          background: var(--saver-sec-btn-bg); color: var(--saver-sec-btn-text);
+          cursor: pointer; transition: all 0.2s;
+        }
+        .saver-attach-select-btn:hover { opacity: 0.8; }
+        .saver-attach-status { font-size: 12px; color: var(--saver-sub-text); min-width: 80px; }
+        
+        .saver-attachment-hint {
+          padding: 12px; background: var(--saver-log-bg); border-radius: 8px;
+          font-size: 12px; color: var(--saver-log-text); border: 1px solid var(--saver-border);
+          line-height: 1.6;
+        }
+        
+        /* 收集文件夹区域 */
+        .saver-collection-area {
+          margin-bottom: 16px; padding: 12px; background: var(--saver-format-bg);
+          border-radius: 8px; border: 1px solid var(--saver-border);
+        }
+        .saver-collection-header {
+          display: flex; justify-content: space-between; align-items: center;
+          margin-bottom: 12px; font-weight: 600; font-size: 13px;
+          color: var(--saver-text);
+        }
+        .saver-collection-set-btn {
+          padding: 4px 12px; border-radius: 6px; font-size: 12px; border: none;
+          background: var(--saver-sec-btn-bg); color: var(--saver-sec-btn-text);
+          cursor: pointer; transition: all 0.2s;
+        }
+        .saver-collection-set-btn:hover { opacity: 0.8; }
+        
+        .saver-collection-files {
+          max-height: 150px; overflow-y: auto;
+        }
+        .saver-collection-empty {
+          text-align: center; padding: 20px; font-size: 12px;
+          color: var(--saver-sub-text); opacity: 0.8;
+        }
+        .saver-collection-folder-name {
+          font-size: 12px; font-weight: 600; margin-bottom: 8px;
+          color: var(--saver-text); opacity: 0.9;
+        }
+        .saver-collection-list {
+          display: flex; flex-direction: column; gap: 4px;
+        }
+        .saver-collection-file {
+          display: flex; align-items: center; gap: 8px; padding: 8px;
+          background: var(--saver-bg); border-radius: 6px; cursor: pointer;
+          transition: all 0.2s; border: 1px solid var(--saver-border);
+        }
+        .saver-collection-file:hover {
+          background: var(--saver-format-active-bg); border-color: #10a37f;
+        }
+        .saver-collection-file.selected {
+          background: #e6f7f2; border-color: #10a37f;
+        }
+        .saver-collection-file-icon { font-size: 16px; }
+        .saver-collection-file-name {
+          flex: 1; font-size: 12px; overflow: hidden; text-overflow: ellipsis;
+          white-space: nowrap; color: var(--saver-text);
+        }
+        .saver-collection-file-size {
+          font-size: 11px; color: var(--saver-sub-text); opacity: 0.7;
+        }
+        
+        .saver-detected-header {
+          font-weight: 600; font-size: 13px; margin-bottom: 8px;
+          color: var(--saver-text);
+        }
+        
+        .saver-attach-copy-btn {
+          padding: 4px 8px; border-radius: 4px; font-size: 12px; border: none;
+          background: var(--saver-sec-btn-bg); cursor: pointer;
+          transition: all 0.2s; margin-left: 4px;
+        }
+        .saver-attach-copy-btn:hover { opacity: 0.8; transform: scale(1.1); }
+        
+        .saver-attachment-footer {
+          padding: 16px 20px; border-top: 1px solid var(--saver-border);
+          display: flex; gap: 12px; justify-content: flex-end;
+          background: var(--saver-bg);
+        }
+        
         /* 分隔线 */
         .saver-divider {
           height: 1px; background: var(--saver-border); margin: 12px 0;
@@ -2630,10 +3582,180 @@ ${messagesContent}
     createFloatingButton() {
       const btn = document.createElement('button');
       btn.id = 'chatgpt-saver-btn';
-      btn.innerHTML = LOGO_SVG;
-      btn.title = 'ChatGPT 对话保存助手';
-      btn.onclick = () => this.togglePanel();
+
+      // 内联 SVG，支持动画
+      btn.innerHTML = DEER_ICON_SVG;
+
+      btn.title = 'ChatGPT 对话保存助手 (可拖动)';
       document.body.appendChild(btn);
+
+      // 启动表情动画
+      this.startDeerAnimations(btn);
+
+      // 拖动功能
+      this.initDraggable(btn);
+    },
+    
+    // 小鹿表情动画
+    startDeerAnimations(btn) {
+      const blink = () => {
+        const eyeLeftOpen = btn.querySelector('.deer-eye-left');
+        const eyeLeftClosed = btn.querySelector('.deer-eye-left-closed');
+        const eyeRightOpen = btn.querySelector('.deer-eye-right');
+        const eyeRightClosed = btn.querySelector('.deer-eye-right-closed');
+        
+        if (!eyeLeftOpen) return;
+        
+        // 闭眼
+        eyeLeftOpen.style.display = 'none';
+        eyeLeftClosed.style.display = 'block';
+        eyeRightOpen.style.display = 'none';
+        eyeRightClosed.style.display = 'block';
+        
+        // 150ms 后睁开
+        setTimeout(() => {
+          eyeLeftOpen.style.display = 'block';
+          eyeLeftClosed.style.display = 'none';
+          eyeRightOpen.style.display = 'block';
+          eyeRightClosed.style.display = 'none';
+        }, 150);
+      };
+      
+      // 随机眨眼（2-5秒一次）
+      const scheduleBlink = () => {
+        const delay = 2000 + Math.random() * 3000;
+        setTimeout(() => {
+          blink();
+          scheduleBlink();
+        }, delay);
+      };
+      scheduleBlink();
+      
+      // 悬停时开心大笑
+      btn.addEventListener('mouseenter', () => {
+        const mouthNormal = btn.querySelector('.deer-mouth');
+        const mouthHappy = btn.querySelector('.deer-mouth-happy');
+        const blushLeft = btn.querySelector('.deer-blush-left');
+        const blushRight = btn.querySelector('.deer-blush-right');
+        
+        if (mouthNormal) mouthNormal.style.display = 'none';
+        if (mouthHappy) mouthHappy.style.display = 'block';
+        if (blushLeft) blushLeft.setAttribute('opacity', '0.7');
+        if (blushRight) blushRight.setAttribute('opacity', '0.7');
+      });
+      
+      btn.addEventListener('mouseleave', () => {
+        const mouthNormal = btn.querySelector('.deer-mouth');
+        const mouthHappy = btn.querySelector('.deer-mouth-happy');
+        const blushLeft = btn.querySelector('.deer-blush-left');
+        const blushRight = btn.querySelector('.deer-blush-right');
+        
+        if (mouthNormal) mouthNormal.style.display = 'block';
+        if (mouthHappy) mouthHappy.style.display = 'none';
+        if (blushLeft) blushLeft.setAttribute('opacity', '0.45');
+        if (blushRight) blushRight.setAttribute('opacity', '0.45');
+      });
+    },
+    
+    initDraggable(btn) {
+      let isDragging = false;
+      let hasMoved = false;
+      let startX, startY, startLeft, startTop;
+      
+      // 从存储恢复位置
+      const savedPos = GM_getValue('btnPosition', null);
+      if (savedPos) {
+        btn.style.right = 'auto';
+        btn.style.bottom = 'auto';
+        btn.style.left = savedPos.left + 'px';
+        btn.style.top = savedPos.top + 'px';
+      }
+      
+      const onMouseDown = (e) => {
+        // 只响应左键
+        if (e.button !== 0) return;
+        
+        isDragging = true;
+        hasMoved = false;
+        btn.classList.add('dragging');
+        
+        const rect = btn.getBoundingClientRect();
+        startX = e.clientX;
+        startY = e.clientY;
+        startLeft = rect.left;
+        startTop = rect.top;
+        
+        e.preventDefault();
+      };
+      
+      const onMouseMove = (e) => {
+        if (!isDragging) return;
+        
+        const dx = e.clientX - startX;
+        const dy = e.clientY - startY;
+        
+        // 如果移动距离超过 5px，认为是拖动
+        if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
+          hasMoved = true;
+        }
+        
+        let newLeft = startLeft + dx;
+        let newTop = startTop + dy;
+        
+        // 限制在视窗内
+        const maxX = window.innerWidth - btn.offsetWidth;
+        const maxY = window.innerHeight - btn.offsetHeight;
+        newLeft = Math.max(0, Math.min(newLeft, maxX));
+        newTop = Math.max(0, Math.min(newTop, maxY));
+        
+        btn.style.right = 'auto';
+        btn.style.bottom = 'auto';
+        btn.style.left = newLeft + 'px';
+        btn.style.top = newTop + 'px';
+      };
+      
+      const onMouseUp = () => {
+        if (!isDragging) return;
+        
+        isDragging = false;
+        btn.classList.remove('dragging');
+        
+        // 保存位置
+        if (hasMoved) {
+          const rect = btn.getBoundingClientRect();
+          GM_setValue('btnPosition', { left: rect.left, top: rect.top });
+        }
+      };
+      
+      const onClick = (e) => {
+        // 如果刚才拖动过，不触发点击
+        if (hasMoved) {
+          e.preventDefault();
+          e.stopPropagation();
+          hasMoved = false;
+          return;
+        }
+        this.togglePanel();
+      };
+      
+      btn.addEventListener('mousedown', onMouseDown);
+      document.addEventListener('mousemove', onMouseMove);
+      document.addEventListener('mouseup', onMouseUp);
+      btn.addEventListener('click', onClick);
+      
+      // 触屏支持
+      btn.addEventListener('touchstart', (e) => {
+        const touch = e.touches[0];
+        onMouseDown({ button: 0, clientX: touch.clientX, clientY: touch.clientY, preventDefault: () => {} });
+      }, { passive: true });
+      
+      document.addEventListener('touchmove', (e) => {
+        if (!isDragging) return;
+        const touch = e.touches[0];
+        onMouseMove({ clientX: touch.clientX, clientY: touch.clientY });
+      }, { passive: true });
+      
+      document.addEventListener('touchend', onMouseUp);
     },
 
     createToast() {
@@ -2648,6 +3770,35 @@ ${messagesContent}
       if (this.toastTimer) clearTimeout(this.toastTimer);
       this.toast.textContent = message;
       this.toast.className = 'show ' + type;
+      
+      // 让 Toast 跟随悬浮按钮位置
+      const btn = document.getElementById('chatgpt-saver-btn');
+      if (btn) {
+        const rect = btn.getBoundingClientRect();
+        // 显示在按钮上方
+        this.toast.style.left = 'auto';
+        this.toast.style.right = 'auto';
+        this.toast.style.bottom = 'auto';
+        this.toast.style.top = 'auto';
+        
+        const toastHeight = 40; // 预估高度
+        const gap = 10;
+        
+        // 根据按钮位置决定 Toast 显示在上方还是下方
+        if (rect.top > toastHeight + gap + 20) {
+          // 显示在按钮上方
+          this.toast.style.bottom = (window.innerHeight - rect.top + gap) + 'px';
+        } else {
+          // 显示在按钮下方
+          this.toast.style.top = (rect.bottom + gap) + 'px';
+        }
+        
+        // 水平居中对齐按钮
+        const btnCenterX = rect.left + rect.width / 2;
+        this.toast.style.left = btnCenterX + 'px';
+        this.toast.style.transform = 'translateX(-50%)' + (this.toast.classList.contains('show') ? '' : ' translateY(10px)');
+      }
+      
       if (duration > 0) {
         this.toastTimer = setTimeout(() => { this.toast.className = ''; }, duration);
       }
@@ -2691,12 +3842,14 @@ ${messagesContent}
           <div class="saver-folder-status" id="saver-folder-status" style="margin-bottom: 8px; font-size: 12px; color: var(--saver-sub-text);">
             保存位置: <span id="saver-folder-name" style="color: var(--saver-active-color);">浏览器下载</span>
           </div>
-          <button class="saver-action-btn secondary" id="saver-auto-toggle" style="font-size: 12px; padding: 8px;">
-            ${CONFIG.autoSave ? '🔵 自动保存: 开启' : '⚪ 自动保存: 关闭'}
-          </button>
-          <button class="saver-action-btn secondary" id="saver-log-toggle" style="font-size: 12px; padding: 8px;">
-            ${CONFIG.showLogPanel ? '📋 显示日志弹框: 开启' : '📋 显示日志弹框: 关闭'}
-          </button>
+          <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+            <button class="saver-action-btn secondary" id="saver-auto-toggle" style="font-size: 12px; padding: 8px; margin-bottom: 0; flex: 1; display: flex; align-items: center; justify-content: center; gap: 4px;">
+              ${CONFIG.autoSave ? '✅ 自动保存' : '⚪ 自动保存'}
+            </button>
+            <button class="saver-action-btn secondary" id="saver-log-toggle" style="font-size: 12px; padding: 8px; margin-bottom: 0; flex: 1; display: flex; align-items: center; justify-content: center; gap: 4px;">
+              ${CONFIG.showLogPanel ? '✅ 显示日志' : '⚪ 显示日志'}
+            </button>
+          </div>
           <div class="saver-status" id="saver-observer-status">
             状态: <span id="saver-observer-text">未启动</span>
           </div>
@@ -2745,7 +3898,7 @@ ${messagesContent}
       document.getElementById('saver-auto-toggle').onclick = (e) => {
         CONFIG.autoSave = !CONFIG.autoSave;
         GM_setValue('autoSave', CONFIG.autoSave);
-        e.target.textContent = CONFIG.autoSave ? '🔵 自动保存: 开启' : '⚪ 自动保存: 关闭';
+        e.target.textContent = CONFIG.autoSave ? '✅ 自动保存' : '⚪ 自动保存';
         if (CONFIG.autoSave) {
           startAutoSave();
         } else {
@@ -2757,7 +3910,7 @@ ${messagesContent}
       document.getElementById('saver-log-toggle').onclick = (e) => {
         CONFIG.showLogPanel = !CONFIG.showLogPanel;
         GM_setValue('showLogPanel', CONFIG.showLogPanel);
-        e.target.textContent = CONFIG.showLogPanel ? '📋 显示日志弹框: 开启' : '📋 显示日志弹框: 关闭';
+        e.target.textContent = CONFIG.showLogPanel ? '✅ 显示日志' : '⚪ 显示日志';
       };
 
       // 导出上下文 JSON
@@ -3180,6 +4333,10 @@ ${messagesContent}
       pendingReauthHandle = restoreResult.handle;
       console.log('[ChatGPT Saver] 文件夹需要重新授权');
     }
+    
+    // 初始化附件管理器（恢复收集文件夹）
+    await AttachmentManager.init();
+    console.log('[ChatGPT Saver] 附件管理器已初始化');
 
     // 初始化UI
     const initUI = () => {

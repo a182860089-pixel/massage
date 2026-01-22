@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT 对话保存助手
 // @namespace    https://github.com/a182860089-pixel/massage
-// @version      2.5
+// @version      2.6
 // @description  自动保存 ChatGPT 对话，支持导出为 HTML、Markdown、PDF 格式，支持上下文导出与导入
 // @author       ChatGPT Saver
 // @match        https://chat.openai.com/*
@@ -9,8 +9,8 @@
 // @match        https://*.openai.com/*
 // @match        https://*.chatgpt.com/*
 // @icon         https://chat.openai.com/favicon.ico
-// @updateURL    https://mirror.ghproxy.com/https://raw.githubusercontent.com/a182860089-pixel/massage/main/chatgpt-saver.user.js
-// @downloadURL  https://mirror.ghproxy.com/https://raw.githubusercontent.com/a182860089-pixel/massage/main/chatgpt-saver.user.js
+// @updateURL    https://raw.githubusercontent.com/a182860089-pixel/massage/main/chatgpt-saver.user.js
+// @downloadURL  https://raw.githubusercontent.com/a182860089-pixel/massage/main/chatgpt-saver.user.js
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addStyle
@@ -19,6 +19,10 @@
 // @grant        GM_xmlhttpRequest
 // @connect      raw.githubusercontent.com
 // @connect      mirror.ghproxy.com
+// @connect      ghproxy.net
+// @connect      gh-proxy.com
+// @connect      raw.gitmirror.com
+// @connect      fastly.jsdelivr.net
 // @require      https://unpkg.com/turndown@7.1.2/dist/turndown.js
 // @require      https://unpkg.com/html2canvas@1.4.1/dist/html2canvas.min.js
 // @require      https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js
@@ -39,8 +43,15 @@
     saveMode: 'download', // 'download' 或 'folder'
     // 更新检查配置
     updateCheckInterval: 3 * 24 * 60 * 60 * 1000, // 3天（毫秒）
-    updateURL: 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/a182860089-pixel/massage/main/chatgpt-saver.user.js',
-    currentVersion: '2.5'
+    // 多镜像源列表（按优先级排列，自动切换）
+    updateMirrors: [
+      'https://ghproxy.net/https://raw.githubusercontent.com/a182860089-pixel/massage/main/chatgpt-saver.user.js',
+      'https://gh-proxy.com/https://raw.githubusercontent.com/a182860089-pixel/massage/main/chatgpt-saver.user.js',
+      'https://raw.gitmirror.com/a182860089-pixel/massage/main/chatgpt-saver.user.js',
+      'https://fastly.jsdelivr.net/gh/a182860089-pixel/massage@main/chatgpt-saver.user.js',
+      'https://raw.githubusercontent.com/a182860089-pixel/massage/main/chatgpt-saver.user.js'
+    ],
+    currentVersion: '2.6'
   };
 
   // 保存的文件夹句柄
@@ -3321,9 +3332,9 @@ ${messagesContent}
       }
     },
     
-    // 从远程获取版本号
+    // 从远程获取版本号（自动尝试多个镜像源）
     fetchRemoteVersion() {
-      return new Promise((resolve) => {
+      return new Promise(async (resolve) => {
         // 检查 GM_xmlhttpRequest 是否可用
         if (typeof GM_xmlhttpRequest === 'undefined') {
           console.error('[ChatGPT Saver] GM_xmlhttpRequest 不可用');
@@ -3331,40 +3342,45 @@ ${messagesContent}
           return;
         }
         
-        console.log('[ChatGPT Saver] 正在请求:', CONFIG.updateURL);
+        // 依次尝试每个镜像源
+        for (let i = 0; i < CONFIG.updateMirrors.length; i++) {
+          const mirrorUrl = CONFIG.updateMirrors[i];
+          console.log(`[ChatGPT Saver] 尝试镜像源 ${i + 1}/${CONFIG.updateMirrors.length}: ${mirrorUrl}`);
+          
+          const result = await this.fetchFromMirror(mirrorUrl);
+          if (result) {
+            console.log(`[ChatGPT Saver] ✅ 镜像源 ${i + 1} 成功，版本: ${result}`);
+            resolve(result);
+            return;
+          }
+          console.log(`[ChatGPT Saver] ❌ 镜像源 ${i + 1} 失败，尝试下一个...`);
+        }
         
+        console.error('[ChatGPT Saver] 所有镜像源均失败');
+        resolve(null);
+      });
+    },
+    
+    // 从单个镜像源获取版本
+    fetchFromMirror(url) {
+      return new Promise((resolve) => {
         GM_xmlhttpRequest({
           method: 'GET',
-          url: CONFIG.updateURL + '?t=' + Date.now(), // 缓存破坏
-          timeout: 15000, // 增加超时时间
-          headers: {
-            'Cache-Control': 'no-cache'
-          },
+          url: url + '?t=' + Date.now(),
+          timeout: 8000, // 每个源8秒超时
+          headers: { 'Cache-Control': 'no-cache' },
           onload: (response) => {
-            console.log('[ChatGPT Saver] 请求响应状态:', response.status);
             if (response.status === 200) {
-              // 从脚本头部提取版本号
               const match = response.responseText.match(/@version\s+([\d.]+)/);
               if (match) {
-                console.log('[ChatGPT Saver] 获取到远程版本:', match[1]);
                 resolve(match[1]);
-              } else {
-                console.error('[ChatGPT Saver] 无法解析版本号');
-                resolve(null);
+                return;
               }
-            } else {
-              console.error('[ChatGPT Saver] 请求失败:', response.status);
-              resolve(null);
             }
-          },
-          onerror: (error) => {
-            console.error('[ChatGPT Saver] 网络请求错误:', error);
             resolve(null);
           },
-          ontimeout: () => {
-            console.error('[ChatGPT Saver] 请求超时');
-            resolve(null);
-          }
+          onerror: () => resolve(null),
+          ontimeout: () => resolve(null)
         });
       });
     },
@@ -3421,7 +3437,7 @@ ${messagesContent}
     
     // 打开更新页面
     openUpdatePage() {
-      window.open(CONFIG.updateURL, '_blank');
+      window.open('https://github.com/a182860089-pixel/massage', '_blank');
     },
     
     // 显示手动检查指引（网络失败时）

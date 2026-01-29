@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT 对话保存助手
 // @namespace    https://github.com/a182860089-pixel/massage
-// @version      2.6
+// @version      3.1
 // @description  自动保存 ChatGPT 对话，支持导出为 HTML、Markdown、PDF 格式，支持上下文导出与导入
 // @author       ChatGPT Saver
 // @match        https://chat.openai.com/*
@@ -30,13 +30,13 @@
 // @noframes
 // ==/UserScript==
 
-(function() {
+(function () {
   'use strict';
 
   // ==================== 配置 ====================
   const CONFIG = {
     autoSave: false, // 默认关闭自动保存（因为需要用户手势来选择文件夹）
-    formats: { html: true, md: true, pdf: true },
+    formats: GM_getValue('formats', { html: true, md: true, pdf: true }),
     debounceDelay: 3000,
     showPanel: true,
     showLogPanel: GM_getValue('showLogPanel', true), // 是否显示日志弹框
@@ -51,16 +51,234 @@
       'https://fastly.jsdelivr.net/gh/a182860089-pixel/massage@main/chatgpt-saver.user.js',
       'https://raw.githubusercontent.com/a182860089-pixel/massage/main/chatgpt-saver.user.js'
     ],
-    currentVersion: '2.6'
+    currentVersion: '3.1'
   };
 
   // 保存的文件夹句柄
   let savedFolderHandle = null;
-  
+
   // IndexedDB 配置
   const DB_NAME = 'ChatGPTSaverDB';
   const DB_STORE = 'fileHandles';
   const DB_KEY = 'rootFolderHandle';
+
+  // ==================== 用量统计模块 (移植自 cishu.js) ====================
+  const UsageMonitor = {
+    data: null,
+    listeners: [],
+    initialized: false,
+
+    // 关注的模型列表 (GPT-5.2 系列) - 根据图片数据更新额度和时间窗口
+    targetModels: [
+      { id: 'gpt-5-2', name: 'Auto', limit: 10000, window: 3 * 60 * 60 * 1000 }, // 3h
+      { id: 'gpt-5-2-instant', name: 'Instant', limit: 10000, window: 3 * 60 * 60 * 1000 }, // 3h
+      { id: 'gpt-5-2-thinking', name: 'Thinking', limit: 3000, window: 7 * 24 * 60 * 60 * 1000 }, // 7d
+      { id: 'gpt-5-2-pro', name: 'Pro', limit: 15, window: 30 * 24 * 60 * 60 * 1000 } // 30d
+    ],
+
+    init() {
+      if (this.initialized) return;
+      this.initialized = true;
+      this.loadData();
+      this.installInterceptor();
+    },
+
+    loadData() {
+      let raw = GM_getValue('usageData', {});
+      if (!raw.models) raw.models = {};
+      this.data = raw;
+    },
+
+    saveData() {
+      GM_setValue('usageData', this.data);
+      this.notifyListeners();
+    },
+
+    addListener(fn) {
+      this.listeners.push(fn);
+    },
+
+    notifyListeners() {
+      this.listeners.forEach(fn => fn());
+      if (typeof UI !== 'undefined' && UI.updateUsage) {
+        UI.updateUsage();
+      }
+    },
+
+    recordUsage(modelKey) {
+      // 映射 gpt-5 到 gpt-5-instant 显示
+      if (modelKey === 'gpt-5') modelKey = 'gpt-5-2-instant'; // Legacy or simple mapping
+
+      if (!this.data.models[modelKey]) {
+        this.data.models[modelKey] = { requests: [] };
+      }
+      if (!Array.isArray(this.data.models[modelKey].requests)) {
+        this.data.models[modelKey].requests = [];
+      }
+
+      const now = Date.now();
+      this.data.models[modelKey].requests.push(now);
+
+      // 清理过期数据 (最长保留30天)
+      const thirtyDays = 30 * 24 * 60 * 60 * 1000;
+      this.data.models[modelKey].requests = this.data.models[modelKey].requests.filter(t => now - t < thirtyDays);
+
+      this.saveData();
+    },
+
+    getStats() {
+      const stats = {};
+      const now = Date.now();
+
+      this.targetModels.forEach(m => {
+        const requests = (this.data && this.data.models && this.data.models[m.id]?.requests) || [];
+        // 使用模型特定的时间窗口，默认为 24h
+        const timeWindow = m.window || 24 * 60 * 60 * 1000;
+
+        stats[m.id] = {
+          today: requests.filter(t => now - t < timeWindow).length,
+          total: requests.length,
+          name: m.name
+        };
+      });
+      return stats;
+    },
+
+    installInterceptor() {
+      const _this = this;
+      const targetWindow = typeof unsafeWindow === "undefined" ? window : unsafeWindow;
+      if (targetWindow.fetch.__usagePatched) return;
+
+      const originalFetch = targetWindow.fetch;
+      let pendingAutoRequests = new Map();
+
+      const resolveRedirectedModelId = (originalModelId) => {
+        if (originalModelId === "auto") return "gpt-5-2";
+        return originalModelId;
+      };
+
+      const mapRoutedSlugToModelKey = (baseModelKey, routedModelSlug, didAutoSwitchToReasoning) => {
+        const slug = (routedModelSlug || "").toLowerCase();
+        if (baseModelKey === "gpt-5-2") {
+          if (slug.includes("pro")) return "gpt-5-2-pro";
+          const looksReasoning = didAutoSwitchToReasoning === true || slug.includes("thinking") || slug.includes("reasoning");
+          return looksReasoning ? "gpt-5-2-thinking" : "gpt-5-2-instant";
+        }
+        return routedModelSlug || baseModelKey;
+      };
+
+      const resolveAutoRequest = (requestId, routed) => {
+        const req = pendingAutoRequests.get(requestId);
+        if (!req || req.resolved) return;
+
+        const modelKey = mapRoutedSlugToModelKey(
+          req.baseModelKey,
+          routed?.modelSlug,
+          routed?.didAutoSwitchToReasoning
+        );
+
+        req.resolved = true;
+        _this.recordUsage(modelKey);
+        pendingAutoRequests.delete(requestId);
+      };
+
+      const parseSse = async (response, onJson) => {
+        const body = response?.body;
+        if (!body || typeof body.getReader !== "function") return;
+        const reader = body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            let sepIdx;
+            while ((sepIdx = buffer.indexOf("\n\n")) !== -1) {
+              const rawEvent = buffer.slice(0, sepIdx);
+              buffer = buffer.slice(sepIdx + 2);
+              const dataLines = rawEvent.split("\n").filter(l => l.startsWith("data:")).map(l => l.slice(5).trimStart());
+              if (!dataLines.length) continue;
+              const data = dataLines.join("\n");
+              if (!data || data === "[DONE]") continue; // Ignore [DONE]
+              try { onJson(JSON.parse(data)); } catch { }
+            }
+          }
+        } catch (e) { }
+      };
+
+      const extractRoutingInfo = (json) => {
+        if (!json || typeof json !== "object") return null;
+        const ste = json.server_ste_metadata || json;
+        if (ste && (ste.type === "server_ste_metadata" || json.type === "server_ste_metadata")) {
+          const modelSlug = ste.model_slug || ste.model || ste.modelSlug;
+          const didAutoSwitch = ste.did_auto_switch_to_reasoning ?? ste.didAutoSwitchToReasoning;
+          if (modelSlug || didAutoSwitch !== undefined) {
+            return { modelSlug, didAutoSwitchToReasoning: didAutoSwitch };
+          }
+        }
+        const message = json.message;
+        const metadata = message?.metadata;
+        const modelSlug = metadata?.model_slug || metadata?.modelSlug;
+        if (modelSlug) return { modelSlug };
+        return null;
+      };
+
+      targetWindow.fetch = new Proxy(originalFetch, {
+        apply: async function (target, thisArg, args) {
+          let autoRequestId = null;
+          const [info, init] = args;
+          const url = typeof info === 'string' ? info : info?.url || '';
+          const method = init?.method || (typeof info === 'object' && info?.method) || 'GET';
+
+          try {
+            if (method === 'POST' && url.includes('/conversation') && !url.includes('/conversations')) {
+              if (init && init.body) {
+                const body = JSON.parse(init.body);
+                if (body?.model) {
+                  const modelId = body.model;
+                  const effectiveId = resolveRedirectedModelId(modelId);
+
+                  if (effectiveId === 'gpt-5-2') {
+                    autoRequestId = Date.now() + Math.random().toString();
+                    pendingAutoRequests.set(autoRequestId, {
+                      baseModelKey: 'gpt-5-2',
+                      startedAt: Date.now(),
+                      resolved: false
+                    });
+                    setTimeout(() => { // Fallback timeout
+                      const req = pendingAutoRequests.get(autoRequestId);
+                      if (req && !req.resolved) {
+                        _this.recordUsage('gpt-5-2');
+                        pendingAutoRequests.delete(autoRequestId);
+                      }
+                    }, 60000);
+                  } else {
+                    _this.recordUsage(effectiveId);
+                  }
+                }
+              }
+            }
+          } catch (e) { }
+
+          const response = await target.apply(thisArg, args);
+
+          if (autoRequestId) {
+            try {
+              const clone = response.clone();
+              parseSse(clone, (json) => {
+                const info = extractRoutingInfo(json);
+                if (info) resolveAutoRequest(autoRequestId, info);
+              });
+            } catch (e) { }
+          }
+
+          return response;
+        }
+      });
+      targetWindow.fetch.__usagePatched = true;
+    }
+  };
 
   // ==================== 工具函数 ====================
   const Utils = {
@@ -196,7 +414,7 @@
         // 检查权限状态
         const permission = await handle.queryPermission({ mode: 'readwrite' });
         console.log('[ChatGPT Saver] 文件夹权限状态:', permission);
-        
+
         if (permission === 'granted') {
           // 权限还在，直接使用
           savedFolderHandle = handle;
@@ -256,27 +474,104 @@
       }
     },
 
-    // 获取或创建文件夹
+    // 获取或创建文件夹（增强版）
     async getOrCreateFolder(parentHandle, folderName) {
       try {
+        // 首先验证父级句柄是否有效
+        if (!parentHandle) {
+          throw new Error('父级文件夹句柄无效');
+        }
+
+        // 检查权限
+        const permission = await parentHandle.queryPermission({ mode: 'readwrite' });
+        if (permission !== 'granted') {
+          // 尝试重新请求权限
+          const requestPermission = await parentHandle.requestPermission({ mode: 'readwrite' });
+          if (requestPermission !== 'granted') {
+            throw new Error('文件夹访问权限被拒绝');
+          }
+        }
+
         return await parentHandle.getDirectoryHandle(folderName, { create: true });
       } catch (e) {
-        console.error('创建文件夹失败:', folderName, e);
+        console.error('创建文件夹失败:', folderName, e.name, e.message);
+
+        // 如果是 NotFoundError，说明父级目录不存在或句柄已失效
+        if (e.name === 'NotFoundError') {
+          throw new Error(`无法访问目录：父级文件夹可能已被删除或移动`);
+        }
+        // 如果是权限相关错误
+        if (e.name === 'NotAllowedError' || e.name === 'SecurityError') {
+          throw new Error(`权限错误：需要重新授权文件夹访问权限`);
+        }
+        // 如果是无效句柄
+        if (e.message?.includes('handle is not valid') || e.message?.includes('not found')) {
+          throw new Error(`文件夹句柄已失效，请重新选择保存文件夹`);
+        }
+
         throw e;
       }
     },
 
-    // 保存文件到文件夹
-    async saveToFolder(folderHandle, filename, content, mimeType) {
+    // 保存文件到文件夹（增强版 - 带重试机制）
+    async saveToFolder(folderHandle, filename, content, mimeType, retryCount = 0) {
+      const MAX_RETRIES = 3;
+
       try {
+        if (!folderHandle) {
+          throw new Error('文件夹句柄无效');
+        }
+
+        // 验证权限
+        const permission = await folderHandle.queryPermission({ mode: 'readwrite' });
+        if (permission !== 'granted') {
+          const requestPermission = await folderHandle.requestPermission({ mode: 'readwrite' });
+          if (requestPermission !== 'granted') {
+            throw new Error('文件夹访问权限被拒绝');
+          }
+        }
+
         const blob = content instanceof Blob ? content : new Blob([content], { type: mimeType });
         const fileHandle = await folderHandle.getFileHandle(filename, { create: true });
-        const writable = await fileHandle.createWritable();
+
+        // 尝试创建可写流
+        let writable;
+        try {
+          writable = await fileHandle.createWritable();
+        } catch (streamError) {
+          // 如果创建流失败，可能是文件被占用，等待后重试
+          if (retryCount < MAX_RETRIES &&
+            (streamError.name === 'InvalidStateError' || streamError.name === 'NoModificationAllowedError')) {
+            console.log(`[ChatGPT Saver] 文件 ${filename} 可能被占用，等待后重试 (${retryCount + 1}/${MAX_RETRIES})`);
+            await new Promise(resolve => setTimeout(resolve, 500 * (retryCount + 1)));
+            return this.saveToFolder(folderHandle, filename, content, mimeType, retryCount + 1);
+          }
+          throw streamError;
+        }
+
         await writable.write(blob);
         await writable.close();
         return true;
+
       } catch (e) {
-        console.error('保存文件失败:', e);
+        console.error('保存文件失败:', filename, e.name, e.message);
+
+        // InvalidStateError - 文件状态变化，可以重试
+        if (e.name === 'InvalidStateError' && retryCount < MAX_RETRIES) {
+          console.log(`[ChatGPT Saver] 遇到 InvalidStateError，等待后重试 (${retryCount + 1}/${MAX_RETRIES})`);
+          await new Promise(resolve => setTimeout(resolve, 500 * (retryCount + 1)));
+          return this.saveToFolder(folderHandle, filename, content, mimeType, retryCount + 1);
+        }
+
+        // 记录详细错误信息
+        if (e.name === 'NotFoundError') {
+          console.error('目录不存在或已被删除');
+        } else if (e.name === 'NotAllowedError' || e.name === 'SecurityError') {
+          console.error('权限不足');
+        } else if (e.name === 'InvalidStateError') {
+          console.error('文件状态错误，可能是并发写入冲突');
+        }
+
         return false;
       }
     },
@@ -285,7 +580,7 @@
     async createConversationFolders(rootHandle, workspaceName, conversationTitle) {
       const safeWorkspace = this.sanitizeFileName(workspaceName || '个人帐户');
       const safeTitle = this.sanitizeFileName(conversationTitle);
-      
+
       // 创建空间文件夹
       const workspaceFolder = await this.getOrCreateFolder(rootHandle, safeWorkspace);
       // 创建对话文件夹
@@ -294,7 +589,7 @@
       const htmlFolder = await this.getOrCreateFolder(conversationFolder, 'html');
       const mdFolder = await this.getOrCreateFolder(conversationFolder, 'md');
       const pdfFolder = await this.getOrCreateFolder(conversationFolder, 'pdf');
-      
+
       return {
         workspace: workspaceFolder,
         conversation: conversationFolder,
@@ -351,7 +646,7 @@
       try {
         const safeWorkspace = this.sanitizeFileName(workspaceName || '个人帐户');
         const safeTitle = this.sanitizeFileName(conversationTitle);
-        
+
         // 检查空间文件夹
         let workspaceFolder;
         try {
@@ -359,7 +654,7 @@
         } catch (e) {
           return { needsUpdate: true, reason: 'new', savedCount: 0 };
         }
-        
+
         // 检查对话文件夹
         let conversationFolder;
         try {
@@ -367,7 +662,7 @@
         } catch (e) {
           return { needsUpdate: true, reason: 'new', savedCount: 0 };
         }
-        
+
         // 尝试读取已保存的HTML文件来获取消息数
         let savedMessageCount = 0;
         try {
@@ -380,21 +675,21 @@
           // HTML文件不存在，需要保存
           return { needsUpdate: true, reason: 'no_html', savedCount: 0 };
         }
-        
+
         // 比较消息数量
         if (currentMessageCount > savedMessageCount) {
-          return { 
-            needsUpdate: true, 
-            reason: 'updated', 
+          return {
+            needsUpdate: true,
+            reason: 'updated',
             savedCount: savedMessageCount,
             currentCount: currentMessageCount
           };
         }
-        
+
         // 消息数等于或小于已保存的，无需更新
-        return { 
-          needsUpdate: false, 
-          reason: 'unchanged', 
+        return {
+          needsUpdate: false,
+          reason: 'unchanged',
           savedCount: savedMessageCount,
           currentCount: currentMessageCount,
           path: `${safeWorkspace}/${safeTitle}`
@@ -405,40 +700,119 @@
       }
     },
 
-    // 保存对话到分层目录（只保存缺失的格式）
+    // 保存对话到分层目录（增强版 - 带权限验证和详细错误处理）
     async saveConversationToFolder(rootHandle, workspaceName, conversationTitle, htmlContent, mdContent, pdfBlob, formats, missingFormats = null) {
       try {
-        const folders = await this.createConversationFolders(rootHandle, workspaceName, conversationTitle);
+        // 首先验证根目录句柄是否有效
+        if (!rootHandle) {
+          return {
+            success: false,
+            error: '保存文件夹未设置，请先选择保存文件夹',
+            needReselectFolder: true
+          };
+        }
+
+        // 验证根目录权限
+        try {
+          const permission = await rootHandle.queryPermission({ mode: 'readwrite' });
+          if (permission !== 'granted') {
+            const requestPermission = await rootHandle.requestPermission({ mode: 'readwrite' });
+            if (requestPermission !== 'granted') {
+              return {
+                success: false,
+                error: '文件夹访问权限被拒绝，请重新选择保存文件夹',
+                needReselectFolder: true
+              };
+            }
+          }
+        } catch (permError) {
+          console.error('验证权限失败:', permError);
+          return {
+            success: false,
+            error: `文件夹句柄已失效: ${permError.message}，请重新选择保存文件夹`,
+            needReselectFolder: true
+          };
+        }
+
+        // 创建目录结构
+        let folders;
+        try {
+          folders = await this.createConversationFolders(rootHandle, workspaceName, conversationTitle);
+        } catch (folderError) {
+          console.error('创建目录结构失败:', folderError);
+          return {
+            success: false,
+            error: `创建目录失败: ${folderError.message}`,
+            needReselectFolder: folderError.message.includes('重新选择') || folderError.message.includes('权限')
+          };
+        }
+
         const saved = [];
-        
+        const failed = [];
+
         // 如果指定了缺失格式，只保存缺失的
         const shouldSaveHtml = formats.html && htmlContent && (!missingFormats || missingFormats.includes('html') || missingFormats.includes('all'));
         const shouldSaveMd = formats.md && mdContent && (!missingFormats || missingFormats.includes('md') || missingFormats.includes('all'));
         const shouldSavePdf = formats.pdf && pdfBlob && (!missingFormats || missingFormats.includes('pdf') || missingFormats.includes('all'));
-        
+
+        // 保存 HTML
         if (shouldSaveHtml) {
-          await this.saveToFolder(folders.html, `${folders.title}.html`, htmlContent, 'text/html');
-          saved.push('HTML');
+          const success = await this.saveToFolder(folders.html, `${folders.title}.html`, htmlContent, 'text/html');
+          if (success) {
+            saved.push('HTML');
+          } else {
+            failed.push('HTML');
+          }
         }
-        
+
+        // 保存 Markdown
         if (shouldSaveMd) {
-          await this.saveToFolder(folders.md, `${folders.title}.md`, mdContent, 'text/markdown');
-          saved.push('MD');
+          const success = await this.saveToFolder(folders.md, `${folders.title}.md`, mdContent, 'text/markdown');
+          if (success) {
+            saved.push('MD');
+          } else {
+            failed.push('MD');
+          }
         }
-        
+
+        // 保存 PDF
         if (shouldSavePdf) {
-          await this.saveToFolder(folders.pdf, `${folders.title}.pdf`, pdfBlob, 'application/pdf');
-          saved.push('PDF');
+          const success = await this.saveToFolder(folders.pdf, `${folders.title}.pdf`, pdfBlob, 'application/pdf');
+          if (success) {
+            saved.push('PDF');
+          } else {
+            failed.push('PDF');
+          }
         }
-        
+
+        // 如果全部失败
+        if (saved.length === 0 && failed.length > 0) {
+          return {
+            success: false,
+            error: `保存失败: ${failed.join(', ')} 格式保存均失败`,
+            failed,
+            needReselectFolder: true
+          };
+        }
+
+        // 如果部分失败
+        if (failed.length > 0) {
+          console.warn('部分格式保存失败:', failed);
+        }
+
         return {
           success: true,
           saved,
+          failed: failed.length > 0 ? failed : undefined,
           path: `${folders.workspaceName}/${folders.title}`
         };
       } catch (e) {
         console.error('保存对话失败:', e);
-        return { success: false, error: e.message };
+        return {
+          success: false,
+          error: e.message || '未知错误',
+          needReselectFolder: e.message?.includes('权限') || e.message?.includes('文件夹')
+        };
       }
     }
   };
@@ -510,8 +884,8 @@
         const text = btn.textContent?.trim();
         if (text && text.length >= 2 && text.length <= 60) {
           if (text.includes('@') || text.includes('新') || text.includes('搜索') ||
-              text.includes('设置') || text.includes('帮助') || text.includes('退出') ||
-              text.includes('Ctrl')) {
+            text.includes('设置') || text.includes('帮助') || text.includes('退出') ||
+            text.includes('Ctrl')) {
             continue;
           }
           const nameEl = btn.querySelector('.line-clamp-1');
@@ -573,16 +947,16 @@
       let contentEl = null;
       if (isUser) {
         contentEl = messageEl.querySelector('.whitespace-pre-wrap') ||
-                    messageEl.querySelector('[data-message-content]');
+          messageEl.querySelector('[data-message-content]');
       }
       if (isAssistant) {
         contentEl = messageEl.querySelector('[class*="markdown"]') ||
-                    messageEl.querySelector('.prose');
+          messageEl.querySelector('.prose');
       }
       if (!contentEl) {
         contentEl = messageEl.querySelector('[class*="markdown"]') ||
-                    messageEl.querySelector('.prose') ||
-                    messageEl.querySelector('.whitespace-pre-wrap');
+          messageEl.querySelector('.prose') ||
+          messageEl.querySelector('.whitespace-pre-wrap');
       }
       if (!contentEl) contentEl = messageEl;
 
@@ -853,6 +1227,9 @@
       const conversation = Parser.parseConversation();
       if (!conversation.messages.length) return null;
 
+      let container = null;
+      let overlay = null;
+
       try {
         const { jsPDF } = jspdf;
         const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
@@ -863,36 +1240,85 @@
         const contentWidth = pageWidth - margin * 2;
         const contentHeight = pageHeight - margin * 2 - 24;
 
-        // 创建临时容器
-        const container = this.createPDFContainer(conversation, contentWidth);
+        UI.addLog('🎨 正在准备 PDF 内容...');
+
+        // 创建临时容器（完全可见，因为 html2canvas 需要可见元素）
+        // 容器将被置于 z-index: -9999，被网页内容遮挡，用户不可见但可渲染
+        container = this.createPDFContainer(conversation, contentWidth);
         document.body.appendChild(container);
-        
-        // 等待DOM渲染
-        await new Promise(resolve => setTimeout(resolve, 100));
+
+        // 等待 DOM 渲染和字体加载
+        await new Promise(resolve => setTimeout(resolve, 500));
         await this.yieldToMain();
 
-        // 使用较低的scale减少内存和CPU占用
+        // 确保所有图片加载完成
+        const images = container.querySelectorAll('img');
+        if (images.length > 0) {
+          await Promise.all(Array.from(images).map(img => {
+            if (img.complete) return Promise.resolve();
+            return new Promise(resolve => {
+              img.onload = resolve;
+              img.onerror = resolve;
+            });
+          }));
+        }
+
         UI.addLog('📸 正在捕捉页面内容...');
+
+        // 获取容器实际尺寸
+        const containerRect = container.getBoundingClientRect();
+        console.log('[PDF Export] 容器尺寸:', containerRect.width, 'x', containerRect.height);
+
+        // 使用 html2canvas 渲染
+        // 关键：元素必须完全可见，opacity 必须为 1
         const canvas = await html2canvas(container, {
-          scale: 1.5,  // 降低 scale，从 2 降到 1.5
+          scale: 2,  // 提高清晰度
           useCORS: true,
-          logging: false,
+          allowTaint: true,
+          logging: true,  // 启用日志便于调试
           backgroundColor: '#ffffff',
-          // 异步渲染，减少主线程阻塞
-          async: true,
-          allowTaint: true
+          width: containerRect.width,
+          height: containerRect.height,
+          // 确保克隆的元素也是完全可见的
+          onclone: (clonedDoc) => {
+            const clonedContainer = clonedDoc.getElementById('chatgpt-saver-pdf-container');
+            if (clonedContainer) {
+              clonedContainer.style.position = 'static';
+              clonedContainer.style.opacity = '1';
+              clonedContainer.style.visibility = 'visible';
+              clonedContainer.style.zIndex = 'auto';
+            }
+          },
+          // 忽略不需要的元素
+          ignoreElements: (element) => {
+            return element.tagName === 'SCRIPT' || element.tagName === 'NOSCRIPT';
+          }
         });
 
-        document.body.removeChild(container);
+        // 移除临时容器
+        if (container && container.parentNode) {
+          document.body.removeChild(container);
+          container = null;
+        }
+
         await this.yieldToMain();
 
+        // 检查 canvas 是否有效
+        if (!canvas || canvas.width === 0 || canvas.height === 0) {
+          console.error('html2canvas 返回了无效的 canvas');
+          UI.addLog('❌ 页面捕捉失败：canvas 无效');
+          return null;
+        }
+
         UI.addLog('📄 正在生成PDF页面...');
-        
+
         const imgWidth = contentWidth;
         const imgHeight = (canvas.height * imgWidth) / canvas.width;
         const totalPages = Math.ceil(imgHeight / contentHeight);
 
-        // 分批处理页面，每页之间yield给主线程
+        UI.addLog(`📑 共 ${totalPages} 页`);
+
+        // 分批处理页面
         for (let page = 0; page < totalPages; page++) {
           if (page > 0) pdf.addPage();
 
@@ -902,76 +1328,162 @@
           pdf.text('ChatGPT Saver', margin, 8);
           pdf.text(new Date().toLocaleDateString('en-US'), pageWidth - margin - 20, 8);
 
-          // 计算裁剪
+          // 计算裁剪区域
           const sourceY = page * contentHeight * (canvas.height / imgHeight);
           const sourceHeight = Math.min(contentHeight * (canvas.height / imgHeight), canvas.height - sourceY);
 
+          // 创建页面 canvas
           const pageCanvas = document.createElement('canvas');
           pageCanvas.width = canvas.width;
-          pageCanvas.height = sourceHeight;
+          pageCanvas.height = Math.ceil(sourceHeight);
           const ctx = pageCanvas.getContext('2d');
+
+          // 填充白色背景，防止透明区域变黑
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, pageCanvas.width, pageCanvas.height);
+
+          // 绘制内容
           ctx.drawImage(canvas, 0, sourceY, canvas.width, sourceHeight, 0, 0, canvas.width, sourceHeight);
 
-          // 使用较低质量减少处理时间
-          const pageImgData = pageCanvas.toDataURL('image/jpeg', 0.85);
+          // 转换为图片数据
+          const pageImgData = pageCanvas.toDataURL('image/jpeg', 0.92);
           const pageImgHeight = (sourceHeight * imgWidth) / canvas.width;
           pdf.addImage(pageImgData, 'JPEG', margin, margin + 12, imgWidth, pageImgHeight);
 
           // 页脚
           pdf.text(`${page + 1} / ${totalPages}`, pageWidth - margin - 15, pageHeight - 8);
 
-          // 每处理几页后yield一次，让浏览器响应
+          // 每处理几页后 yield 一次
           if (page % 2 === 0) {
             await this.yieldToMain();
           }
         }
 
-        // 最后输出前yield
         await this.yieldToMain();
+        UI.addLog('✅ PDF 生成完成');
         return pdf.output('blob');
+
       } catch (error) {
         console.error('PDF 生成失败:', error);
+        UI.addLog(`❌ PDF 生成失败: ${error.message}`);
         return null;
+      } finally {
+        // 确保清理临时元素
+        if (container && container.parentNode) {
+          document.body.removeChild(container);
+        }
       }
     },
 
     createPDFContainer(conversation, widthMM) {
       const widthPx = widthMM * 3.78;
       const container = document.createElement('div');
+      container.id = 'chatgpt-saver-pdf-container';
+
+      // 关键：html2canvas 需要元素完全可见才能渲染！
+      // opacity: 0 或 visibility: hidden 都会导致渲染失败
+      // 使用 fixed 定位，但 z-index 设为负数，藏在网页内容下面
+      // 这样用户看不见，但 html2canvas 依然能捕捉到
       container.style.cssText = `
-        position: absolute; left: -9999px; top: 0; width: ${widthPx}px;
-        background: white; font-family: -apple-system, BlinkMacSystemFont, 'Microsoft YaHei', sans-serif;
-        padding: 20px; line-height: 1.6; font-size: 14px;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: ${widthPx}px;
+        max-height: none;
+        overflow: visible;
+        z-index: -9999;
+        background: #ffffff;
+        background-color: #ffffff;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+        padding: 20px;
+        line-height: 1.6;
+        font-size: 14px;
+        color: #000000;
+        opacity: 1;
+        visibility: visible;
       `;
 
+      // 标题头部
       const header = document.createElement('div');
       header.style.cssText = `
-        text-align: center; margin-bottom: 20px; padding: 20px;
+        text-align: center;
+        margin-bottom: 20px;
+        padding: 20px;
         background: linear-gradient(135deg, #10a37f 0%, #0d8a6a 100%);
-        border-radius: 10px; color: white;
+        border-radius: 10px;
+        color: #ffffff;
       `;
       header.innerHTML = `
-        <h1 style="margin: 0 0 8px 0; font-size: 20px;">${Utils.escapeHtml(conversation.title)}</h1>
-        <p style="margin: 0; font-size: 12px; opacity: 0.9;">
+        <h1 style="margin: 0 0 8px 0; font-size: 20px; color: #ffffff;">${Utils.escapeHtml(conversation.title)}</h1>
+        <p style="margin: 0; font-size: 12px; opacity: 0.9; color: #ffffff;">
           导出时间: ${new Date().toLocaleString('zh-CN')} | 共 ${conversation.messages.length} 条消息
         </p>
       `;
       container.appendChild(header);
 
+      // 消息列表
       conversation.messages.forEach(msg => {
         const isUser = msg.role === 'user';
         const messageDiv = document.createElement('div');
         messageDiv.style.cssText = `
-          margin: 15px 0; padding: 15px; border-radius: 8px;
-          background: ${isUser ? '#f0fdf4' : '#f8fafc'};
+          margin: 15px 0;
+          padding: 15px;
+          border-radius: 8px;
+          background-color: ${isUser ? '#f0fdf4' : '#f8fafc'};
           border-left: 4px solid ${isUser ? '#10a37f' : '#6366f1'};
         `;
-        messageDiv.innerHTML = `
-          <div style="font-weight: 600; color: ${isUser ? '#10a37f' : '#6366f1'}; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid #e5e5e5;">
-            ${isUser ? '👤 用户' : '🤖 ChatGPT'}
-          </div>
-          <div style="color: #374151; font-size: 13px; line-height: 1.7; word-wrap: break-word;">${msg.content}</div>
+
+        // 角色标题
+        const roleDiv = document.createElement('div');
+        roleDiv.style.cssText = `
+          font-weight: 600;
+          color: ${isUser ? '#10a37f' : '#6366f1'};
+          margin-bottom: 10px;
+          padding-bottom: 8px;
+          border-bottom: 1px solid #e5e5e5;
         `;
+        roleDiv.textContent = isUser ? '👤 用户' : '🤖 ChatGPT';
+        messageDiv.appendChild(roleDiv);
+
+        // 消息内容
+        const contentDiv = document.createElement('div');
+        contentDiv.style.cssText = `
+          color: #374151;
+          font-size: 13px;
+          line-height: 1.7;
+          word-wrap: break-word;
+          overflow-wrap: break-word;
+        `;
+        contentDiv.innerHTML = msg.content;
+
+        // 处理内容中的代码块样式
+        contentDiv.querySelectorAll('pre').forEach(pre => {
+          pre.style.cssText = `
+            background-color: #1e1e1e;
+            color: #d4d4d4;
+            padding: 12px;
+            border-radius: 6px;
+            overflow-x: auto;
+            font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+            font-size: 12px;
+            margin: 10px 0;
+          `;
+        });
+
+        contentDiv.querySelectorAll('code').forEach(code => {
+          if (!code.closest('pre')) {
+            code.style.cssText = `
+              background-color: #f3f4f6;
+              color: #e53e3e;
+              padding: 2px 6px;
+              border-radius: 4px;
+              font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+              font-size: 0.9em;
+            `;
+          }
+        });
+
+        messageDiv.appendChild(contentDiv);
         container.appendChild(messageDiv);
       });
 
@@ -988,7 +1500,7 @@
     collectionFolderHandle: null,  // 文件收集文件夹句柄
     collectionFiles: [],  // 收集文件夹中的文件列表
     uploadInterceptorStarted: false,  // 上传拦截器是否已启动
-    
+
     // 初始化：尝试恢复收集文件夹
     async init() {
       // 从 IndexedDB 恢复文件夹句柄
@@ -1001,13 +1513,13 @@
           request.onsuccess = () => resolve(request.result || null);
           request.onerror = () => resolve(null);
         });
-        
+
         if (handle) {
           const permission = await handle.queryPermission({ mode: 'readwrite' });
           if (permission === 'granted') {
             this.collectionFolderHandle = handle;
             console.log('[ChatGPT Saver] 收集文件夹已恢复:', handle.name);
-            
+
             // 扫描收集文件夹，获取已有文件列表
             await this.scanCollectionFolder();
           }
@@ -1015,23 +1527,23 @@
       } catch (e) {
         console.log('[ChatGPT Saver] 恢复收集文件夹失败:', e.message);
       }
-      
+
       // 启动文件上传拦截器
       this.startUploadInterceptor();
     },
-    
+
     // ==================== 文件上传拦截器 ====================
     // 监听用户上传文件，立即保存到收集文件夹
     startUploadInterceptor() {
       if (this.uploadInterceptorStarted) return;
       this.uploadInterceptorStarted = true;
-      
+
       console.log('[ChatGPT Saver] 启动文件上传拦截器...');
-      
+
       // 监听所有 file input 的 change 事件（使用事件委托）
       document.addEventListener('change', async (e) => {
         const target = e.target;
-        
+
         // 检查是否是文件输入框，且不是我们自己的
         if (target.type === 'file' && target.id !== 'saver-file-input' && !target.id?.startsWith('saver-attach-file-')) {
           const files = target.files;
@@ -1041,7 +1553,7 @@
           }
         }
       }, true);  // 使用捕获阶段，确保最先捕获到事件
-      
+
       // 同时监听拖放上传
       document.addEventListener('drop', async (e) => {
         // 等待一小段时间，让 ChatGPT 先处理
@@ -1053,10 +1565,10 @@
           }
         }, 100);
       }, true);
-      
+
       console.log('[ChatGPT Saver] 文件上传拦截器已启动');
     },
-    
+
     // 拦截并保存上传的文件
     async interceptUploadedFiles(fileList) {
       // 检查是否有收集文件夹
@@ -1064,7 +1576,7 @@
         console.log('[ChatGPT Saver] 未设置收集文件夹，跳过自动保存');
         return;
       }
-      
+
       // 检查权限
       try {
         const permission = await this.collectionFolderHandle.queryPermission({ mode: 'readwrite' });
@@ -1076,21 +1588,21 @@
         console.log('[ChatGPT Saver] 检查收集文件夹权限失败:', e.message);
         return;
       }
-      
+
       let savedCount = 0;
-      
+
       for (const file of fileList) {
         try {
           // 检查文件是否已存在
           const exists = this.collectionFiles.some(
             cf => cf.name.toLowerCase() === file.name.toLowerCase()
           );
-          
+
           if (exists) {
             console.log(`[ChatGPT Saver] 文件已存在于收集文件夹: ${file.name}`);
             continue;
           }
-          
+
           // 保存到收集文件夹
           const success = await Utils.saveToFolder(
             this.collectionFolderHandle,
@@ -1098,11 +1610,11 @@
             file,
             file.type
           );
-          
+
           if (success) {
             savedCount++;
             console.log(`[ChatGPT Saver] ✅ 文件已保存到收集文件夹: ${file.name}`);
-            
+
             // 更新缓存
             this.collectionFiles.push({
               name: file.name,
@@ -1116,12 +1628,12 @@
           console.error(`[ChatGPT Saver] 保存文件失败 ${file.name}:`, e);
         }
       }
-      
+
       if (savedCount > 0) {
         UI.showToast(`📥 已自动保存 ${savedCount} 个文件到收集文件夹`, 'success', 3000);
       }
     },
-    
+
     // 选择收集文件夹
     async selectCollectionFolder() {
       if (!Utils.isFileSystemSupported()) {
@@ -1132,7 +1644,7 @@
         // 使用 readwrite 模式，因为需要复制文件到收集文件夹
         const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
         this.collectionFolderHandle = handle;
-        
+
         // 保存到 IndexedDB
         const db = await Utils.openDB();
         await new Promise((resolve, reject) => {
@@ -1142,7 +1654,7 @@
           tx.oncomplete = () => resolve(true);
           tx.onerror = () => reject(tx.error);
         });
-        
+
         console.log('[ChatGPT Saver] 收集文件夹已设置:', handle.name);
         return handle;
       } catch (e) {
@@ -1152,13 +1664,13 @@
         return null;
       }
     },
-    
+
     // 扫描收集文件夹中的文件
     async scanCollectionFolder() {
       if (!this.collectionFolderHandle) {
         return [];
       }
-      
+
       const files = [];
       try {
         // 检查权限（请求读写权限，因为需要复制文件到收集文件夹）
@@ -1170,7 +1682,7 @@
             return [];
           }
         }
-        
+
         for await (const entry of this.collectionFolderHandle.values()) {
           if (entry.kind === 'file') {
             const file = await entry.getFile();
@@ -1184,14 +1696,34 @@
             });
           }
         }
-        
+
         // 按文件名排序
         files.sort((a, b) => a.name.localeCompare(b.name));
         console.log(`[ChatGPT Saver] 收集文件夹中有 ${files.length} 个文件`);
       } catch (e) {
         console.error('[ChatGPT Saver] 扫描收集文件夹失败:', e);
+
+        // 如果是 NotFoundError，说明文件夹已被删除或移动
+        if (e.name === 'NotFoundError' || e.name === 'InvalidStateError') {
+          console.log('[ChatGPT Saver] 收集文件夹已失效，正在清理...');
+          this.collectionFolderHandle = null;
+          this.collectionFiles = [];
+
+          // 从 IndexedDB 中删除失效的句柄
+          try {
+            const db = await Utils.openDB();
+            const tx = db.transaction('fileHandles', 'readwrite');
+            const store = tx.objectStore('fileHandles');
+            store.delete('collectionFolderHandle');
+            console.log('[ChatGPT Saver] 已清理失效的收集文件夹句柄');
+          } catch (dbError) {
+            console.warn('[ChatGPT Saver] 清理 IndexedDB 失败:', dbError);
+          }
+
+          return [];
+        }
       }
-      
+
       this.collectionFiles = files;
       return files;
     },
@@ -1200,38 +1732,38 @@
     scanAttachments() {
       console.log('[ChatGPT Saver] ===== 开始扫描用户上传的附件 =====');
       const attachments = [];
-      
+
       // 只扫描用户消息中的附件（排除 GPT 回复中的引用）
       const userMessages = document.querySelectorAll('[data-message-author-role="user"]');
       console.log(`[ChatGPT Saver] 找到 ${userMessages.length} 条用户消息`);
-      
+
       for (const msgEl of userMessages) {
         // 获取用户消息的容器（包括附件区域）
-        const messageContainer = msgEl.closest('[class*="group"]') || 
-                                  msgEl.closest('article') ||
-                                  msgEl.parentElement?.parentElement;
-        
+        const messageContainer = msgEl.closest('[class*="group"]') ||
+          msgEl.closest('article') ||
+          msgEl.parentElement?.parentElement;
+
         if (!messageContainer) continue;
-        
+
         // 方法 1: 查找带有文件扩展名的文本元素
         const textElements = messageContainer.querySelectorAll(
           '[class*="truncate"], [class*="overflow-hidden"], [class*="text-ellipsis"], [class*="line-clamp"]'
         );
-        
+
         for (const el of textElements) {
           // 排除 GPT 回复中的元素（footnote/引用按钮）
           if (el.closest('[data-message-author-role="assistant"]') ||
-              el.closest('[class*="footnote"]') ||
-              el.closest('[class*="citation"]')) {
+            el.closest('[class*="footnote"]') ||
+            el.closest('[class*="citation"]')) {
             continue;
           }
-          
+
           const text = el.textContent?.trim();
           // 检查是否像文件名
           if (text && text.length < 200 && text.length > 2) {
             // 匹配常见文件扩展名
             if (text.match(/\.(doc|docx|pdf|txt|md|json|csv|xls|xlsx|ppt|pptx|zip|rar|png|jpg|jpeg|gif|py|js|ts|html|css|java|cpp|c|xml|yaml|yml)$/i) ||
-                text.match(/\.(doc|docx|pdf|txt|md|json|csv|xls|xlsx|ppt|pptx|zip|rar|png|jpg|jpeg|gif|py|js|ts|html|css|java|cpp|c|xml|yaml|yml)\.\.\./i)) {
+              text.match(/\.(doc|docx|pdf|txt|md|json|csv|xls|xlsx|ppt|pptx|zip|rar|png|jpg|jpeg|gif|py|js|ts|html|css|java|cpp|c|xml|yaml|yml)\.\.\./i)) {
               const cleanName = text.replace(/\.\.\.\s*$/, '').trim();
               if (cleanName && !attachments.some(a => a.name === cleanName)) {
                 console.log(`[ChatGPT Saver] 找到用户上传的文件: "${cleanName}"`);
@@ -1244,7 +1776,7 @@
             }
           }
         }
-        
+
         // 方法 2: 在用户消息容器内查找附件特定选择器
         const attachmentSelectors = [
           '[data-testid="attachment"]',
@@ -1253,14 +1785,14 @@
           'img[src*="files.oaiusercontent.com"]',
           'a[download]'
         ];
-        
+
         for (const selector of attachmentSelectors) {
           try {
             const elements = messageContainer.querySelectorAll(selector);
             for (const el of elements) {
               // 确保不是 GPT 回复中的元素
               if (el.closest('[data-message-author-role="assistant"]')) continue;
-              
+
               const attachment = this.parseAttachmentElement(el);
               if (attachment && !attachments.some(a => a.name === attachment.name)) {
                 console.log(`[ChatGPT Saver] 通过选择器找到文件: "${attachment.name}"`);
@@ -1272,30 +1804,30 @@
           }
         }
       }
-      
+
       console.log(`[ChatGPT Saver] ===== 扫描完成，共 ${attachments.length} 个用户上传的附件 =====`);
       if (attachments.length > 0) {
         console.log('[ChatGPT Saver] 附件列表:', attachments.map(a => a.name));
       }
       return attachments;
     },
-    
+
     // 解析附件元素
     parseAttachmentElement(element) {
       // 尝试从不同属性提取文件名
       let filename = null;
       let fileType = 'unknown';
-      
+
       // 从 download 属性
       if (element.hasAttribute('download')) {
         filename = element.getAttribute('download');
       }
-      
+
       // 从 alt 或 title
       if (!filename) {
         filename = element.getAttribute('alt') || element.getAttribute('title');
       }
-      
+
       // 从 href 或 src
       if (!filename) {
         const url = element.getAttribute('href') || element.getAttribute('src');
@@ -1304,7 +1836,7 @@
           if (match) filename = match[1];
         }
       }
-      
+
       // 从内部文本
       if (!filename) {
         const textContent = element.textContent?.trim();
@@ -1312,12 +1844,12 @@
           filename = textContent;
         }
       }
-      
+
       if (!filename) return null;
-      
+
       // 清理文件名（去除末尾的 ... 等）
       filename = filename.replace(/\.\.\.\s*$/, '').trim();
-      
+
       // 识别文件类型
       const ext = filename.split('.').pop()?.toLowerCase();
       if (['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(ext)) {
@@ -1331,14 +1863,14 @@
       } else if (['py', 'js', 'java', 'cpp', 'ts'].includes(ext)) {
         fileType = 'code';
       }
-      
+
       return {
         name: filename,
         type: fileType,
         icon: this.getFileIcon(fileType)
       };
     },
-    
+
     // 获取文件图标
     getFileIcon(fileType) {
       const icons = {
@@ -1351,7 +1883,7 @@
       };
       return icons[fileType] || icons.unknown;
     },
-    
+
     // 根据文件名猜测文件类型
     guessFileType(filename) {
       if (!filename) return 'unknown';
@@ -1369,30 +1901,30 @@
       }
       return 'unknown';
     },
-    
+
     // 显示附件选择器弹窗
     async showAttachmentPicker(detectedFiles) {
       return new Promise(async (resolve) => {
         this.detectedFiles = detectedFiles;
         this.selectedFiles = [];
         this.resolveCallback = resolve;
-        
+
         // 扫描收集文件夹
         await this.scanCollectionFolder();
-        
+
         this.createAttachmentModal();
         this.renderFileList();
         this.attachmentModal.classList.add('show');
       });
     },
-    
+
     // 创建附件选择器弹窗
     createAttachmentModal() {
       if (this.attachmentModal) {
         // 已存在，只更新内容
         return;
       }
-      
+
       const modal = document.createElement('div');
       modal.className = 'saver-attachment-modal';
       modal.innerHTML = `
@@ -1430,7 +1962,7 @@
       `;
       document.body.appendChild(modal);
       this.attachmentModal = modal;
-      
+
       // 绑定事件
       modal.querySelector('#saver-attach-skip').onclick = () => this.closeModal([]);
       modal.querySelector('#saver-attach-confirm').onclick = () => this.closeModal(this.selectedFiles);
@@ -1439,7 +1971,7 @@
         if (e.target === modal) this.closeModal([]);
       };
     },
-    
+
     // 设置收集文件夹
     async handleSetCollectionFolder() {
       const handle = await this.selectCollectionFolder();
@@ -1449,12 +1981,12 @@
         UI.showToast(`✅ 收集文件夹已设置: ${handle.name}`, 'success', 3000);
       }
     },
-    
+
     // 渲染收集文件夹中的文件
     renderCollectionFiles() {
       const container = document.getElementById('saver-collection-files');
       if (!container) return;
-      
+
       if (!this.collectionFolderHandle) {
         container.innerHTML = `
           <div class="saver-collection-empty">
@@ -1463,7 +1995,7 @@
         `;
         return;
       }
-      
+
       if (this.collectionFiles.length === 0) {
         container.innerHTML = `
           <div class="saver-collection-empty">
@@ -1473,7 +2005,7 @@
         `;
         return;
       }
-      
+
       container.innerHTML = `
         <div class="saver-collection-folder-name">📂 ${this.collectionFolderHandle.name}</div>
         <div class="saver-collection-list">
@@ -1486,7 +2018,7 @@
           `).join('')}
         </div>
       `;
-      
+
       // 绑定点击事件
       container.querySelectorAll('.saver-collection-file').forEach(el => {
         el.addEventListener('click', () => {
@@ -1498,7 +2030,7 @@
         });
       });
     },
-    
+
     // 选择收集文件夹中的文件
     selectCollectionFile(collectionFile) {
       // 找到第一个未选择的附件槽位
@@ -1507,37 +2039,37 @@
         // 所有槽位都已填充，替换第一个
         targetIndex = 0;
       }
-      
+
       // 设置文件
       this.handleFileSelected(targetIndex, collectionFile.file);
-      
+
       // 高亮显示已选择
       const collectionFileEl = document.querySelector(`.saver-collection-file[data-index="${this.collectionFiles.indexOf(collectionFile)}"]`);
       if (collectionFileEl) {
         collectionFileEl.classList.add('selected');
       }
     },
-    
+
     // 格式化文件大小
     formatFileSize(bytes) {
       if (bytes < 1024) return bytes + ' B';
       if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
       return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
     },
-    
+
     // 渲染文件列表
     renderFileList() {
       // 先渲染收集文件夹
       this.renderCollectionFiles();
-      
+
       const listEl = document.getElementById('saver-attachment-list');
       if (!listEl) return;
-      
+
       if (this.detectedFiles.length === 0) {
         listEl.innerHTML = '<div style="text-align: center; padding: 20px; color: #888;">未检测到附件</div>';
         return;
       }
-      
+
       listEl.innerHTML = this.detectedFiles.map((file, index) => `
         <div class="saver-attachment-item" data-index="${index}">
           <span class="saver-attach-icon">${file.icon}</span>
@@ -1548,7 +2080,7 @@
           <span class="saver-attach-status" id="saver-attach-status-${index}">未选择</span>
         </div>
       `).join('');
-      
+
       // 绑定选择按钮事件
       listEl.querySelectorAll('.saver-attach-select-btn').forEach(btn => {
         btn.addEventListener('click', (e) => {
@@ -1556,7 +2088,7 @@
           this.triggerFileSelect(index);
         });
       });
-      
+
       // 绑定复制按钮事件
       listEl.querySelectorAll('.saver-attach-copy-btn').forEach(btn => {
         btn.addEventListener('click', (e) => {
@@ -1566,7 +2098,7 @@
           });
         });
       });
-      
+
       // 绑定文件输入事件
       listEl.querySelectorAll('.saver-attach-input').forEach((input, index) => {
         input.addEventListener('change', (e) => {
@@ -1574,27 +2106,27 @@
         });
       });
     },
-    
+
     // 触发文件选择
     triggerFileSelect(index) {
       const input = document.getElementById(`saver-attach-file-${index}`);
       if (input) input.click();
     },
-    
+
     // 处理文件选择
     handleFileSelected(index, file) {
       if (!file) return;
-      
+
       // 更新已选文件列表
       this.selectedFiles[index] = file;
-      
+
       // 更新状态显示
       const statusEl = document.getElementById(`saver-attach-status-${index}`);
       if (statusEl) {
         statusEl.textContent = `✅ ${file.name}`;
         statusEl.style.color = '#10a37f';
       }
-      
+
       // 检查是否至少选择了一个文件
       const hasSelected = this.selectedFiles.some(f => f !== undefined);
       const confirmBtn = document.getElementById('saver-attach-confirm');
@@ -1602,7 +2134,7 @@
         confirmBtn.disabled = !hasSelected;
       }
     },
-    
+
     // 关闭弹窗
     closeModal(selectedFiles) {
       if (this.attachmentModal) {
@@ -1615,35 +2147,35 @@
         this.resolveCallback = null;
       }
     },
-    
+
     // ==================== 自动保存附件（自动保存时调用） ====================
     async autoSaveAttachments(safeWorkspace, safeTitle) {
       console.log('[ChatGPT Saver] ===== autoSaveAttachments 开始 =====');
-      
+
       // 检查是否有保存文件夹
       if (!savedFolderHandle) {
         console.log('[ChatGPT Saver] 没有保存文件夹，跳过附件保存');
         return;
       }
-      
+
       // 扫描页面上的附件
       const detectedFiles = this.scanAttachments();
-      
+
       if (detectedFiles.length === 0) {
         console.log('[ChatGPT Saver] 未检测到附件，跳过');
         return;
       }
-      
+
       console.log(`[ChatGPT Saver] 检测到 ${detectedFiles.length} 个附件`);
       UI.addLog(`📎 检测到 ${detectedFiles.length} 个附件`);
-      
+
       // 扫描收集文件夹
       await this.scanCollectionFolder();
-      
+
       // 尝试自动匹配
       const matchedFiles = [];
       const unmatchedFiles = [];
-      
+
       for (const detected of detectedFiles) {
         const matched = this.findMatchingFile(detected.name);
         if (matched) {
@@ -1654,7 +2186,7 @@
           console.log(`[ChatGPT Saver] ❌ 未匹配: ${detected.name}`);
         }
       }
-      
+
       // 如果有未匹配的文件，弹窗让用户选择
       let userSelectedFiles = [];
       if (unmatchedFiles.length > 0) {
@@ -1662,62 +2194,62 @@
         UI.addLog(`⚠️ ${unmatchedFiles.length} 个附件需要手动选择`);
         userSelectedFiles = await this.showAttachmentPicker(unmatchedFiles);
       }
-      
+
       // 合并所有要保存的文件
       const filesToSave = [];
-      
+
       // 添加自动匹配的文件
       for (const { detected, matched } of matchedFiles) {
         filesToSave.push(matched.file);
       }
-      
+
       // 添加用户选择的文件
       for (const file of userSelectedFiles) {
         if (file) {
           filesToSave.push(file);
         }
       }
-      
+
       if (filesToSave.length === 0) {
         console.log('[ChatGPT Saver] 没有文件需要保存');
         return;
       }
-      
+
       // 保存附件
       await this.saveAttachmentFiles(safeWorkspace, safeTitle, filesToSave);
     },
-    
+
     // 从收集文件夹中查找匹配的文件（支持模糊匹配）
     findMatchingFile(fileName) {
       if (!this.collectionFiles || this.collectionFiles.length === 0) {
         return null;
       }
-      
+
       // 清理文件名（去除可能的省略号等）
       const cleanName = fileName.replace(/\.\.\.\s*$/, '').trim().toLowerCase();
-      
+
       // 1. 精确匹配
-      let match = this.collectionFiles.find(f => 
+      let match = this.collectionFiles.find(f =>
         f.name.toLowerCase() === cleanName
       );
       if (match) return match;
-      
+
       // 2. 前缀匹配（处理被截断的文件名）
-      match = this.collectionFiles.find(f => 
+      match = this.collectionFiles.find(f =>
         f.name.toLowerCase().startsWith(cleanName) ||
         cleanName.startsWith(f.name.toLowerCase().replace(/\.[^.]+$/, ''))  // 去掉扩展名比较
       );
       if (match) return match;
-      
+
       // 3. 包含匹配
-      match = this.collectionFiles.find(f => 
+      match = this.collectionFiles.find(f =>
         f.name.toLowerCase().includes(cleanName) ||
         cleanName.includes(f.name.toLowerCase().replace(/\.[^.]+$/, ''))
       );
-      
+
       return match;
     },
-    
+
     // 保存附件文件（到对话附件文件夹和收集文件夹）
     async saveAttachmentFiles(safeWorkspace, safeTitle, files) {
       try {
@@ -1725,13 +2257,13 @@
         const workspaceFolder = await Utils.getOrCreateFolder(savedFolderHandle, safeWorkspace);
         const conversationFolder = await Utils.getOrCreateFolder(workspaceFolder, safeTitle);
         const attachmentsFolder = await Utils.getOrCreateFolder(conversationFolder, 'attachments');
-        
+
         let savedCount = 0;
         let copiedToCollectionCount = 0;
-        
+
         for (const file of files) {
           if (!file) continue;
-          
+
           // 1. 保存到对话的 attachments 文件夹
           const success = await Utils.saveToFolder(attachmentsFolder, file.name, file, file.type);
           if (success) {
@@ -1739,7 +2271,7 @@
             console.log(`[ChatGPT Saver] 附件已保存: ${file.name}`);
             UI.addLog(`  📎 ${file.name}`);
           }
-          
+
           // 2. 同时复制到收集文件夹（如果已设置）
           if (this.collectionFolderHandle) {
             try {
@@ -1747,18 +2279,18 @@
               const existsInCollection = this.collectionFiles.some(
                 cf => cf.name.toLowerCase() === file.name.toLowerCase()
               );
-              
+
               if (!existsInCollection) {
                 const copySuccess = await Utils.saveToFolder(
-                  this.collectionFolderHandle, 
-                  file.name, 
-                  file, 
+                  this.collectionFolderHandle,
+                  file.name,
+                  file,
                   file.type
                 );
                 if (copySuccess) {
                   copiedToCollectionCount++;
                   console.log(`[ChatGPT Saver] 附件已复制到收集文件夹: ${file.name}`);
-                  
+
                   // 更新收集文件夹列表缓存
                   this.collectionFiles.push({
                     name: file.name,
@@ -1774,7 +2306,7 @@
             }
           }
         }
-        
+
         if (savedCount > 0) {
           let msg = `✅ 已保存 ${savedCount} 个附件`;
           if (copiedToCollectionCount > 0) {
@@ -1783,7 +2315,7 @@
           UI.addLog(msg);
           UI.showToast(msg, 'success', 3000);
         }
-        
+
       } catch (e) {
         console.error('[ChatGPT Saver] 保存附件失败:', e);
         UI.addLog(`❌ 附件保存失败: ${e.message}`);
@@ -1804,7 +2336,7 @@
     htmlToPlainText(html) {
       const tempDiv = document.createElement('div');
       tempDiv.innerHTML = html;
-      
+
       // 处理代码块：保留 ```language 格式
       tempDiv.querySelectorAll('pre code').forEach(codeEl => {
         const pre = codeEl.closest('pre');
@@ -1816,17 +2348,17 @@
           pre.textContent = '```' + language + '\n' + codeText + '\n```';
         }
       });
-      
+
       // 处理行内代码
       tempDiv.querySelectorAll('code').forEach(codeEl => {
         if (!codeEl.closest('pre')) {
           codeEl.textContent = '`' + codeEl.textContent + '`';
         }
       });
-      
+
       // 移除按钮等非内容元素
       tempDiv.querySelectorAll('button, svg, [class*="copy"]').forEach(el => el.remove());
-      
+
       return tempDiv.textContent.trim();
     },
 
@@ -1870,13 +2402,13 @@
       const { MAX_TOKENS_PER_CHUNK, MAX_MESSAGES_PER_CHUNK } = this.CHUNK_CONFIG;
       const messages = contextData.messages;
       const chunks = [];
-      
+
       let currentChunk = [];
       let currentTokens = 0;
-      
+
       for (const msg of messages) {
         const msgTokens = msg.tokens || this.estimateTokens(msg.content);
-        
+
         // 如果单条消息超过限制，强制作为单独一个分片
         if (msgTokens > MAX_TOKENS_PER_CHUNK) {
           // 先保存当前分片
@@ -1889,11 +2421,11 @@
           chunks.push({ messages: [msg], tokens: msgTokens });
           continue;
         }
-        
+
         // 检查是否需要开始新分片
         const wouldExceedTokens = currentTokens + msgTokens > MAX_TOKENS_PER_CHUNK;
         const wouldExceedMessages = currentChunk.length >= MAX_MESSAGES_PER_CHUNK;
-        
+
         if (wouldExceedTokens || wouldExceedMessages) {
           if (currentChunk.length > 0) {
             chunks.push({ messages: currentChunk, tokens: currentTokens });
@@ -1905,12 +2437,12 @@
           currentTokens += msgTokens;
         }
       }
-      
+
       // 保存最后一个分片
       if (currentChunk.length > 0) {
         chunks.push({ messages: currentChunk, tokens: currentTokens });
       }
-      
+
       return chunks;
     },
 
@@ -1919,7 +2451,7 @@
       const startIndex = chunkMessages[0].index;
       const endIndex = chunkMessages[chunkMessages.length - 1].index;
       const chunkTokens = chunkMessages.reduce((sum, m) => sum + (m.tokens || 0), 0);
-      
+
       return {
         version: '2.0',
         type: 'chunk',  // 标记为分片
@@ -1958,7 +2490,7 @@
     async export() {
       // 点击后立即显示提示
       UI.showToast('⏳ 正在导出上下文...', 'info', 0);
-      
+
       const conversation = Parser.parseConversation();
       if (!conversation.messages.length) {
         UI.showToast('⚠️ 没有找到可导出的对话内容', 'error', 3000);
@@ -1969,26 +2501,26 @@
       const workspaceName = Parser.getWorkspaceName();
       const safeWorkspace = Utils.sanitizeFileName(workspaceName || '个人帐户');
       const safeTitle = Utils.sanitizeFileName(conversation.title);
-      
+
       // 检查是否需要分片
       const { MAX_TOKENS_PER_CHUNK } = this.CHUNK_CONFIG;
       const needsChunking = contextData.totalTokens > MAX_TOKENS_PER_CHUNK || contextData.messageCount > 25;
-      
+
       let result;
       if (needsChunking) {
         result = await this.exportChunked(contextData, safeWorkspace, safeTitle);
       } else {
         result = await this.exportSingle(contextData, safeWorkspace, safeTitle);
       }
-      
+
       // 导出完成后，检测并保存附件
       if (result && CONFIG.saveMode === 'folder' && savedFolderHandle) {
         await this.detectAndSaveAttachments(safeWorkspace, safeTitle);
       }
-      
+
       return result;
     },
-    
+
     // 检测并保存附件（复用 AttachmentManager.autoSaveAttachments）
     async detectAndSaveAttachments(safeWorkspace, safeTitle) {
       console.log('[ChatGPT Saver] ===== detectAndSaveAttachments 被调用 =====');
@@ -2008,32 +2540,32 @@
           content: m.content
         }))
       };
-      
+
       const jsonStr = this.toJSON(cleanData);
       const filename = `${safeTitle}.json`;
-      
+
       if (CONFIG.saveMode === 'folder' && savedFolderHandle) {
         try {
           const workspaceFolder = await Utils.getOrCreateFolder(savedFolderHandle, safeWorkspace);
           const conversationFolder = await Utils.getOrCreateFolder(workspaceFolder, safeTitle);
           const contextFolder = await Utils.getOrCreateFolder(conversationFolder, 'context');
-          
+
           await Utils.saveToFolder(contextFolder, filename, jsonStr, 'application/json');
-          
-          UI.showToast(`✅ 上下文已保存 (${contextData.messageCount}条消息, ~${Math.round(contextData.totalTokens/1000)}k tokens)`, 'success', 3000);
+
+          UI.showToast(`✅ 上下文已保存 (${contextData.messageCount}条消息, ~${Math.round(contextData.totalTokens / 1000)}k tokens)`, 'success', 3000);
           console.log(`[ChatGPT Saver] 上下文 JSON 已保存: ${safeWorkspace}/${safeTitle}/context/${filename}`);
-          
+
           return { contextData: cleanData, filename, chunked: false };
         } catch (e) {
           console.error('[ChatGPT Saver] 保存上下文 JSON 失败:', e);
         }
       }
-      
+
       // 降级到浏览器下载
       const downloadFilename = `context_${safeTitle}_${Utils.getTimestamp()}.json`;
       Utils.downloadFile(jsonStr, downloadFilename, 'application/json');
       UI.showToast('✅ 上下文 JSON 已下载', 'success', 3000);
-      
+
       return { contextData: cleanData, filename: downloadFilename, chunked: false };
     },
 
@@ -2041,30 +2573,30 @@
     async exportChunked(contextData, safeWorkspace, safeTitle) {
       const chunks = this.splitIntoChunks(contextData);
       const totalChunks = chunks.length;
-      
+
       console.log(`[ChatGPT Saver] 对话将分成 ${totalChunks} 个分片导出`);
       console.log(`[ChatGPT Saver] 总消息数: ${contextData.messageCount}, 总 tokens: ~${contextData.totalTokens}`);
-      
+
       const savedFiles = [];
-      
+
       if (CONFIG.saveMode === 'folder' && savedFolderHandle) {
         try {
           const workspaceFolder = await Utils.getOrCreateFolder(savedFolderHandle, safeWorkspace);
           const conversationFolder = await Utils.getOrCreateFolder(workspaceFolder, safeTitle);
           const contextFolder = await Utils.getOrCreateFolder(conversationFolder, 'context');
-          
+
           // 保存每个分片
           for (let i = 0; i < totalChunks; i++) {
             const chunkData = this.createChunkData(contextData, chunks[i].messages, i + 1, totalChunks);
             const filename = `${safeTitle}_part${String(i + 1).padStart(2, '0')}_of_${String(totalChunks).padStart(2, '0')}.json`;
             const jsonStr = this.toJSON(chunkData);
-            
+
             await Utils.saveToFolder(contextFolder, filename, jsonStr, 'application/json');
             savedFiles.push(filename);
-            
+
             console.log(`[ChatGPT Saver] 分片 ${i + 1}/${totalChunks} 已保存: ${filename}`);
           }
-          
+
           // 创建索引文件
           const indexData = {
             version: '2.0',
@@ -2087,26 +2619,26 @@
               en: `This conversation is split into ${totalChunks} files. Upload all part*.json files to ChatGPT Projects for automatic indexing.`
             }
           };
-          
+
           await Utils.saveToFolder(contextFolder, `_index.json`, this.toJSON(indexData), 'application/json');
-          
+
           UI.showToast(`✅ 已分成 ${totalChunks} 个文件保存 (共 ${contextData.messageCount} 条消息)\n💡 建议上传到 ChatGPT Projects 使用`, 'success', 5000);
-          
-          return { 
-            contextData, 
-            files: savedFiles, 
+
+          return {
+            contextData,
+            files: savedFiles,
             indexFile: '_index.json',
-            chunked: true, 
-            totalChunks 
+            chunked: true,
+            totalChunks
           };
         } catch (e) {
           console.error('[ChatGPT Saver] 保存分片文件失败:', e);
         }
       }
-      
+
       // 降级到浏览器下载：打包成 zip 或者逐个下载
       // 简化处理：提示用户使用文件夹保存模式
-      alert(`对话内容较长（${contextData.messageCount}条消息, ~${Math.round(contextData.totalTokens/1000)}k tokens），需要分成 ${totalChunks} 个文件。\n\n请先点击"选择文件夹"设置保存位置，然后重新导出。`);
+      alert(`对话内容较长（${contextData.messageCount}条消息, ~${Math.round(contextData.totalTokens / 1000)}k tokens），需要分成 ${totalChunks} 个文件。\n\n请先点击"选择文件夹"设置保存位置，然后重新导出。`);
       return null;
     }
   };
@@ -2122,7 +2654,7 @@
     // 创建导入弹窗
     createImportModal() {
       if (this.importModal) return;
-      
+
       const modal = document.createElement('div');
       modal.className = 'saver-import-modal';
       modal.id = 'saver-import-modal';
@@ -2173,7 +2705,7 @@
       `;
       document.body.appendChild(modal);
       this.importModal = modal;
-      
+
       // 绑定事件
       modal.querySelector('#saver-import-cancel').onclick = () => this.hideModal();
       modal.querySelector('#saver-import-select').onclick = () => this.selectLocalFile();
@@ -2181,7 +2713,7 @@
       modal.onclick = (e) => {
         if (e.target === modal) this.hideModal();
       };
-      
+
       // 创建隐藏的文件选择器
       this.createFileInput();
     },
@@ -2189,7 +2721,7 @@
     // 创建隐藏的文件输入
     createFileInput() {
       if (this.fileInput) return;
-      
+
       const input = document.createElement('input');
       input.type = 'file';
       input.id = 'saver-file-input';
@@ -2210,24 +2742,24 @@
     async handleLocalFileSelect(event) {
       const file = event.target.files[0];
       if (!file) return;
-      
+
       try {
         const text = await file.text();
         const data = JSON.parse(text);
-        
+
         // 验证 JSON 结构
         if (!data.messages || !Array.isArray(data.messages)) {
           throw new Error('无效的上下文 JSON 格式');
         }
-        
+
         this.currentContextData = data;
         this.showContentPreview(data);
-        
+
       } catch (e) {
         alert('解析 JSON 文件失败: ' + e.message);
         console.error('[ChatGPT Saver] JSON 解析错误:', e);
       }
-      
+
       event.target.value = '';
     },
 
@@ -2236,28 +2768,28 @@
       if (!savedFolderHandle) {
         return [];
       }
-      
+
       const files = [];
-      
+
       try {
         // 遍历工作空间文件夹
         for await (const workspaceEntry of savedFolderHandle.values()) {
           if (workspaceEntry.kind !== 'directory') continue;
-          
+
           const workspaceName = workspaceEntry.name;
           const workspaceHandle = await savedFolderHandle.getDirectoryHandle(workspaceName);
-          
+
           // 遍历对话文件夹
           for await (const convEntry of workspaceHandle.values()) {
             if (convEntry.kind !== 'directory') continue;
-            
+
             const convName = convEntry.name;
             const convHandle = await workspaceHandle.getDirectoryHandle(convName);
-            
+
             // 检查是否有 context 文件夹
             try {
               const contextFolder = await convHandle.getDirectoryHandle('context', { create: false });
-              
+
               // 遍历 context 文件夹中的 JSON 文件
               for await (const fileEntry of contextFolder.values()) {
                 if (fileEntry.kind === 'file' && fileEntry.name.endsWith('.json')) {
@@ -2278,10 +2810,10 @@
       } catch (e) {
         console.error('[ChatGPT Saver] 扫描文件夹失败:', e);
       }
-      
+
       // 按路径排序
       files.sort((a, b) => a.path.localeCompare(b.path));
-      
+
       return files;
     },
 
@@ -2290,30 +2822,30 @@
       const listArea = document.getElementById('saver-file-list-area');
       const listEl = document.getElementById('saver-file-list');
       const previewEl = document.getElementById('saver-import-preview');
-      
+
       if (files.length === 0) {
         listArea.style.display = 'none';
         previewEl.textContent = '文件夹中没有找到上下文文件\n\n请先导出一些对话上下文，或点击"从本地选择"按钮选择文件';
         return;
       }
-      
+
       listArea.style.display = 'block';
       previewEl.textContent = '请从上方列表中选择一个文件';
-      
+
       // 构建树形结构
       const tree = this.buildFileTree(files);
-      
+
       // 渲染树形结构
       listEl.innerHTML = this.renderTree(tree);
-      
+
       // 绑定事件
       this.bindTreeEvents(listEl, files);
     },
-    
+
     // 构建文件树结构
     buildFileTree(files) {
       const tree = {};
-      
+
       for (const file of files) {
         if (!tree[file.workspace]) {
           tree[file.workspace] = {};
@@ -2323,14 +2855,14 @@
         }
         tree[file.workspace][file.conversation].push(file);
       }
-      
+
       return tree;
     },
-    
+
     // 渲染树形结构 HTML
     renderTree(tree) {
       let html = '';
-      
+
       for (const workspace of Object.keys(tree).sort()) {
         html += `
           <div class="saver-tree-workspace" data-workspace="${workspace}">
@@ -2345,7 +2877,7 @@
             </div>
             <div class="saver-tree-children" style="display: none; padding-left: 16px;">
         `;
-        
+
         for (const conversation of Object.keys(tree[workspace]).sort()) {
           const convFiles = tree[workspace][conversation];
           html += `
@@ -2361,7 +2893,7 @@
               </div>
               <div class="saver-tree-children" style="display: none; padding-left: 16px;">
           `;
-          
+
           for (const file of convFiles) {
             const isChunk = file.filename.includes('_part');
             const isIndex = file.filename === '_index.json';
@@ -2378,22 +2910,22 @@
               </div>
             `;
           }
-          
+
           html += `
               </div>
             </div>
           `;
         }
-        
+
         html += `
             </div>
           </div>
         `;
       }
-      
+
       return html;
     },
-    
+
     // 绑定树形结构事件
     bindTreeEvents(listEl, files) {
       // 创建文件映射：path -> file（使用 file.path 作为唯一标识）
@@ -2402,7 +2934,7 @@
         fileMap[file.path] = file;
         console.log('[ChatGPT Saver] 映射文件:', file.path);
       }
-      
+
       // 文件夹展开/收起
       listEl.querySelectorAll('.saver-tree-folder').forEach(folder => {
         folder.addEventListener('click', (e) => {
@@ -2415,7 +2947,7 @@
             icon.textContent = isOpen ? '📁' : '📂';
           }
         });
-        
+
         // 鼠标悬停效果
         folder.addEventListener('mouseenter', () => {
           folder.style.background = 'var(--saver-format-active-bg)';
@@ -2424,23 +2956,23 @@
           folder.style.background = 'transparent';
         });
       });
-      
+
       // 文件点击
       listEl.querySelectorAll('.saver-tree-file').forEach(fileEl => {
         fileEl.addEventListener('click', async (e) => {
           e.stopPropagation();
           const filePath = fileEl.dataset.filePath;
           const file = fileMap[filePath];
-          
+
           if (!file) {
             console.error('[ChatGPT Saver] 找不到文件:', filePath);
             console.error('[ChatGPT Saver] 可用的 keys:', Object.keys(fileMap));
             return;
           }
-          
+
           console.log('[ChatGPT Saver] 加载文件:', file.filename, '路径:', filePath);
           await this.loadContextFile(file);
-          
+
           // 高亮选中项
           listEl.querySelectorAll('.saver-tree-file').forEach(el => {
             el.classList.remove('selected');
@@ -2451,14 +2983,14 @@
           fileEl.style.background = 'var(--saver-format-active-bg)';
           fileEl.style.borderLeft = '3px solid #10a37f';
         });
-        
+
         // 鼠标悬停效果
-        fileEl.addEventListener('mouseenter', function() {
+        fileEl.addEventListener('mouseenter', function () {
           if (!this.classList.contains('selected')) {
             this.style.background = 'var(--saver-format-active-bg)';
           }
         });
-        fileEl.addEventListener('mouseleave', function() {
+        fileEl.addEventListener('mouseleave', function () {
           if (!this.classList.contains('selected')) {
             this.style.background = 'transparent';
           }
@@ -2472,46 +3004,46 @@
         const file = await fileInfo.handle.getFile();
         const text = await file.text();
         const data = JSON.parse(text);
-        
+
         // 检查是否是索引文件
         if (data.type === 'index') {
           this.showChunkedInfo(data, fileInfo);
           return;
         }
-        
+
         // 检查是否是分片文件
         if (data.type === 'chunk') {
           this.showChunkWarning(data, fileInfo);
           return;
         }
-        
+
         // 普通单文件
         if (!data.messages || !Array.isArray(data.messages)) {
           throw new Error('无效的上下文 JSON 格式');
         }
-        
+
         this.currentContextData = data;
         this.currentFileInfo = fileInfo;  // 保存文件信息，用于文件上传
-        
+
         // 扫描该对话的附件文件夹
         this.conversationAttachments = await this.scanConversationAttachments(fileInfo);
-        
+
         this.showContentPreview(data);
-        
+
       } catch (e) {
         alert('读取文件失败: ' + e.message);
         console.error('[ChatGPT Saver] 读取上下文文件失败:', e);
       }
     },
-    
+
     // 扫描对话的 attachments 文件夹
     async scanConversationAttachments(fileInfo) {
       const attachments = [];
-      
+
       try {
         const workspaceHandle = await savedFolderHandle.getDirectoryHandle(fileInfo.workspace);
         const convHandle = await workspaceHandle.getDirectoryHandle(fileInfo.conversation);
-        
+
         let attachmentsFolder;
         try {
           attachmentsFolder = await convHandle.getDirectoryHandle('attachments', { create: false });
@@ -2519,7 +3051,7 @@
           // 没有 attachments 文件夹
           return [];
         }
-        
+
         for await (const entry of attachmentsFolder.values()) {
           if (entry.kind === 'file') {
             const file = await entry.getFile();
@@ -2532,14 +3064,14 @@
             });
           }
         }
-        
+
         attachments.sort((a, b) => a.name.localeCompare(b.name));
         console.log(`[ChatGPT Saver] 找到 ${attachments.length} 个附件文件`);
-        
+
       } catch (e) {
         console.error('[ChatGPT Saver] 扫描附件文件夹失败:', e);
       }
-      
+
       return attachments;
     },
 
@@ -2549,14 +3081,14 @@
       const metaEl = document.getElementById('saver-import-meta');
       const optionsEl = document.getElementById('saver-import-options');
       const confirmBtn = document.getElementById('saver-import-confirm');
-      
+
       // 显示分片信息
-      const chunksList = indexData.chunks.map(c => 
-        `  ${c.index}. ${c.filename}\n     消息 ${c.messageRange} (共 ${c.messageCount} 条, ~${Math.round(c.tokens/1000)}k tokens)`
+      const chunksList = indexData.chunks.map(c =>
+        `  ${c.index}. ${c.filename}\n     消息 ${c.messageRange} (共 ${c.messageCount} 条, ~${Math.round(c.tokens / 1000)}k tokens)`
       ).join('\n\n');
-      
-      previewEl.textContent = `📦 检测到分片导出（共 ${indexData.chunks.length} 个文件）\n\n总消息数：${indexData.totalMessages} 条\n总 tokens：~${Math.round(indexData.totalTokens/1000)}k\n\n分片列表：\n${chunksList}\n\n💡 建议使用方法：\n1. 在 ChatGPT 点击右上角头像 -> Projects\n2. 创建新 Project 或选择现有 Project\n3. 将所有 part*.json 文件上传到 Project\n4. AI 会自动索引并检索相关内容\n\n⚠️ 不建议通过文本注入导入，因为总内容超过了 ChatGPT 上下文窗口限制。`;
-      
+
+      previewEl.textContent = `📦 检测到分片导出（共 ${indexData.chunks.length} 个文件）\n\n总消息数：${indexData.totalMessages} 条\n总 tokens：~${Math.round(indexData.totalTokens / 1000)}k\n\n分片列表：\n${chunksList}\n\n💡 建议使用方法：\n1. 在 ChatGPT 点击右上角头像 -> Projects\n2. 创建新 Project 或选择现有 Project\n3. 将所有 part*.json 文件上传到 Project\n4. AI 会自动索引并检索相关内容\n\n⚠️ 不建议通过文本注入导入，因为总内容超过了 ChatGPT 上下文窗口限制。`;
+
       metaEl.style.display = 'none';
       optionsEl.style.display = 'none';
       confirmBtn.disabled = true;
@@ -2568,50 +3100,50 @@
       const metaEl = document.getElementById('saver-import-meta');
       const optionsEl = document.getElementById('saver-import-options');
       const confirmBtn = document.getElementById('saver-import-confirm');
-      
+
       // 查找同组的所有分片文件
       const allChunkFiles = await this.findAllChunkFiles(fileInfo, chunkData.chunk.total);
       const foundCount = allChunkFiles.length;
       const totalCount = chunkData.chunk.total;
-      
+
       // 显示分片信息
       let previewText = `📦 检测到分片文件（共 ${totalCount} 个分片）\n\n`;
       previewText += `✅ 已找到 ${foundCount}/${totalCount} 个分片文件\n\n`;
-      
+
       // 列出找到的文件
       previewText += `分片列表：\n`;
       allChunkFiles.forEach((f, i) => {
         previewText += `  ${i + 1}. ${f.filename}\n`;
       });
-      
+
       previewText += `\n原始对话总计：\n`;
       previewText += `- 总消息：${chunkData.original.totalMessages} 条\n`;
-      previewText += `- 总 tokens：~${Math.round(chunkData.original.totalTokens/1000)}k\n\n`;
+      previewText += `- 总 tokens：~${Math.round(chunkData.original.totalTokens / 1000)}k\n\n`;
       previewText += `👇 点击下方按钮一次性上传所有分片文件`;
-      
+
       previewEl.textContent = previewText;
-      
+
       // 保存所有分片文件
       this.currentContextData = chunkData;
       this.currentFileInfo = fileInfo;
       this.allChunkFiles = allChunkFiles;  // 保存所有分片
-      
+
       metaEl.style.display = 'none';
       optionsEl.style.display = 'block';
       confirmBtn.disabled = false;
       confirmBtn.textContent = `上传全部 ${foundCount} 个分片`;
     },
-    
+
     // 查找同组的所有分片文件
     async findAllChunkFiles(fileInfo, totalChunks) {
       const chunkFiles = [];
-      
+
       try {
         // 获取 context 文件夹
         const workspaceHandle = await savedFolderHandle.getDirectoryHandle(fileInfo.workspace);
         const convHandle = await workspaceHandle.getDirectoryHandle(fileInfo.conversation);
         const contextHandle = await convHandle.getDirectoryHandle('context');
-        
+
         // 遍历所有文件，查找 part*.json
         for await (const entry of contextHandle.values()) {
           if (entry.kind === 'file' && entry.name.includes('_part') && entry.name.endsWith('.json')) {
@@ -2623,14 +3155,14 @@
             });
           }
         }
-        
+
         // 按文件名排序（part01, part02...)
         chunkFiles.sort((a, b) => a.filename.localeCompare(b.filename));
-        
+
       } catch (e) {
         console.error('[ChatGPT Saver] 查找分片文件失败:', e);
       }
-      
+
       return chunkFiles;
     },
 
@@ -2640,16 +3172,16 @@
       const metaEl = document.getElementById('saver-import-meta');
       const optionsEl = document.getElementById('saver-import-options');
       const confirmBtn = document.getElementById('saver-import-confirm');
-      
+
       // 显示前几条消息预览
       let previewText = '';
-      const previewMessages = data.messages.slice(0, 3).map(m => 
+      const previewMessages = data.messages.slice(0, 3).map(m =>
         `[${m.role}] ${m.content.substring(0, 100)}${m.content.length > 100 ? '...' : ''}`
       ).join('\n\n');
-      
-      previewText = previewMessages + 
+
+      previewText = previewMessages +
         (data.messages.length > 3 ? `\n\n... 还有 ${data.messages.length - 3} 条消息` : '');
-      
+
       // 显示附件信息
       if (this.conversationAttachments && this.conversationAttachments.length > 0) {
         previewText += `\n\n📎 附件文件 (${this.conversationAttachments.length} 个):`;
@@ -2659,27 +3191,27 @@
         });
         previewText += `\n\n💡 这些附件将和 JSON 一起上传到新对话`;
       }
-      
+
       previewEl.textContent = previewText;
-      
+
       // 显示元信息
       document.getElementById('saver-meta-title').textContent = data.title || '未知';
       document.getElementById('saver-meta-count').textContent = data.messageCount || data.messages.length;
-      document.getElementById('saver-meta-time').textContent = data.exportedAt 
-        ? new Date(data.exportedAt).toLocaleString('zh-CN') 
+      document.getElementById('saver-meta-time').textContent = data.exportedAt
+        ? new Date(data.exportedAt).toLocaleString('zh-CN')
         : '未知';
-      
+
       // 显示 tokens 信息（如果有）
       if (data.totalTokens) {
         const tokensInfo = document.createElement('div');
         tokensInfo.className = 'saver-import-meta-item';
         tokensInfo.innerHTML = `
           <span class="saver-import-meta-label">Tokens</span>
-          <span class="saver-import-meta-value">~${Math.round(data.totalTokens/1000)}k</span>
+          <span class="saver-import-meta-value">~${Math.round(data.totalTokens / 1000)}k</span>
         `;
         document.getElementById('saver-import-meta').appendChild(tokensInfo);
       }
-      
+
       // 显示附件数量
       if (this.conversationAttachments && this.conversationAttachments.length > 0) {
         const attachInfo = document.createElement('div');
@@ -2690,14 +3222,14 @@
         `;
         document.getElementById('saver-import-meta').appendChild(attachInfo);
       }
-      
+
       metaEl.style.display = 'block';
       optionsEl.style.display = 'block';
       confirmBtn.disabled = false;
-      
+
       // 根据是否有附件调整按钮文本
       const attachCount = this.conversationAttachments?.length || 0;
-      confirmBtn.textContent = attachCount > 0 
+      confirmBtn.textContent = attachCount > 0
         ? `导入 JSON + ${attachCount} 个附件`
         : '作为附件导入';
     },
@@ -2706,7 +3238,7 @@
     async showModal() {
       this.createImportModal();
       this.importModal.classList.add('show');
-      
+
       // 重置状态
       this.currentContextData = null;
       document.getElementById('saver-import-preview').textContent = '正在扫描文件夹...';
@@ -2715,7 +3247,7 @@
       document.getElementById('saver-import-confirm').disabled = true;
       document.getElementById('saver-auto-send').checked = false;
       document.getElementById('saver-file-list-area').style.display = 'none';
-      
+
       // 如果有保存文件夹，扫描并显示文件列表
       if (CONFIG.saveMode === 'folder' && savedFolderHandle) {
         console.log('[ChatGPT Saver] 扫描保存文件夹中的上下文文件...');
@@ -2736,37 +3268,37 @@
     // 确认导入
     async confirmImport() {
       if (!this.currentContextData) return;
-      
+
       const autoSend = document.getElementById('saver-auto-send').checked;
       const data = this.currentContextData;
-      
+
       console.log('[ChatGPT Saver] confirmImport 被调用, 数据类型:', data.type);
-      
+
       this.hideModal();
-      
+
       // 决策逻辑：优先使用文件上传
       const isChunk = data.type === 'chunk';
       const shouldUploadAsFile = isChunk || this.currentFileInfo;  // 分片或有文件引用，就上传文件
-      
+
       if (shouldUploadAsFile) {
         const jsonCount = isChunk && this.allChunkFiles ? this.allChunkFiles.length : 1;
         const attachCount = this.conversationAttachments?.length || 0;
         const totalCount = jsonCount + attachCount;
-        
+
         console.log(`[ChatGPT Saver] 尝试上传 ${totalCount} 个文件 (${jsonCount} JSON + ${attachCount} 附件)...`);
         UI.showToast(`📎 正在上传 ${totalCount} 个文件...`, 'saving', 0);
-        
+
         const uploadedCount = await this.uploadAsAttachment();
-        
+
         if (uploadedCount) {
           UI.showToast(`✅ 已上传 ${uploadedCount} 个文件`, 'success', 3000);
           // 清理
           this.allChunkFiles = null;
           this.conversationAttachments = null;
-          
+
           // 注入预设提示词到输入框
           await this.injectContextPrompt(data, jsonCount);
-          
+
           if (autoSend) {
             setTimeout(() => this.triggerSend(), 1000);
           }
@@ -2779,7 +3311,7 @@
         console.log('[ChatGPT Saver] 使用文本注入...');
         UI.showToast('🔄 正在导入上下文...', 'saving', 0);
         const success = await this.injectToInput();
-        
+
         if (success) {
           UI.showToast('✅ 上下文已导入', 'success', 3000);
           if (autoSend) {
@@ -2791,7 +3323,7 @@
         }
       }
     },
-    
+
     // 注入预设提示词到输入框
     async injectContextPrompt(data, fileCount) {
       try {
@@ -2800,48 +3332,48 @@
           console.warn('[ChatGPT Saver] 未找到输入框，无法注入提示词');
           return;
         }
-        
+
         // 构建预设提示词
         const promptText = this.buildContextPrompt(data, fileCount);
-        
+
         if (input.tagName === 'TEXTAREA') {
           // 设置值
           input.value = promptText;
-          
+
           // 触发多种事件确保 React 感知
           input.dispatchEvent(new Event('input', { bubbles: true }));
           input.dispatchEvent(new Event('change', { bubbles: true }));
-          
+
           // 尝试触发 React 的合成事件
           const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
             window.HTMLTextAreaElement.prototype, 'value'
           ).set;
           nativeInputValueSetter.call(input, promptText);
           input.dispatchEvent(new Event('input', { bubbles: true }));
-          
+
         } else if (input.getAttribute('contenteditable') === 'true') {
           input.innerText = promptText;
-          input.dispatchEvent(new InputEvent('input', { 
-            bubbles: true, 
+          input.dispatchEvent(new InputEvent('input', {
+            bubbles: true,
             inputType: 'insertText',
-            data: promptText 
+            data: promptText
           }));
         }
-        
+
         input.focus();
         console.log('[ChatGPT Saver] 已注入预设提示词');
-        
+
       } catch (e) {
         console.error('[ChatGPT Saver] 注入提示词失败:', e);
       }
     },
-    
+
     // 构建上下文导入的预设提示词
     buildContextPrompt(data, fileCount) {
       const title = data.title || '未知对话';
       const messageCount = data.messageCount || data.messages?.length || 0;
       const isChunked = data.type === 'chunk' || fileCount > 1;
-      
+
       // 根据是否分片构建不同的提示词
       if (isChunked) {
         return `我已上传了 ${fileCount} 个 JSON 文件，这是之前对话「${title}」的上下文记录（共 ${data.original?.totalMessages || messageCount} 条消息）。
@@ -2865,12 +3397,12 @@
 注意：请基于文件中的实际内容来理解，而不是猜测。`;
       }
     },
-    
+
     // 上传为附件（支持批量上传 JSON + 附件）
     async uploadAsAttachment() {
       try {
         const filesToUpload = [];
-        
+
         // 1. 添加 JSON 文件
         if (this.allChunkFiles && this.allChunkFiles.length > 0) {
           // 批量上传所有分片
@@ -2891,7 +3423,7 @@
           const file = new File([blob], filename, { type: 'application/json', lastModified: Date.now() });
           filesToUpload.push(file);
         }
-        
+
         // 2. 添加附件文件（如果有）
         if (this.conversationAttachments && this.conversationAttachments.length > 0) {
           console.log(`[ChatGPT Saver] 添加 ${this.conversationAttachments.length} 个附件文件`);
@@ -2901,15 +3433,15 @@
             }
           }
         }
-        
+
         if (filesToUpload.length === 0) {
           console.error('[ChatGPT Saver] 没有文件可上传');
           return false;
         }
-        
+
         console.log(`[ChatGPT Saver] 尝试上传 ${filesToUpload.length} 个文件:`);
         filesToUpload.forEach(f => console.log(`  - ${f.name} (${f.size} bytes)`));
-        
+
         // 查找 ChatGPT 的文件输入
         const fileInputs = document.querySelectorAll('input[type="file"]');
         let targetInput = null;
@@ -2919,37 +3451,37 @@
             break;
           }
         }
-        
+
         if (!targetInput) {
           console.error('[ChatGPT Saver] 未找到文件输入框');
           return false;
         }
-        
+
         console.log('[ChatGPT Saver] 找到文件输入框:', targetInput);
-        
+
         // 创建 DataTransfer 并添加所有文件
         const dataTransfer = new DataTransfer();
         for (const file of filesToUpload) {
           dataTransfer.items.add(file);
         }
         targetInput.files = dataTransfer.files;
-        
+
         // 触发事件
         targetInput.dispatchEvent(new Event('change', { bubbles: true }));
         targetInput.dispatchEvent(new Event('input', { bubbles: true }));
-        
+
         console.log(`[ChatGPT Saver] ${filesToUpload.length} 个文件上传事件已触发`);
-        
+
         // 等待并返回成功
         await this.sleep(500);
         return filesToUpload.length;  // 返回上传文件数量
-        
+
       } catch (e) {
         console.error('[ChatGPT Saver] uploadAsAttachment 错误:', e);
         return false;
       }
     },
-    
+
     // 自动上传附件文件夹中的文件
     async uploadAttachmentsIfExist() {
       // 检查是否有文件信息
@@ -2957,12 +3489,12 @@
         console.log('[ChatGPT Saver] 没有文件信息，跳过附件上传');
         return;
       }
-      
+
       try {
         // 获取 attachments 文件夹
         const workspaceHandle = await savedFolderHandle.getDirectoryHandle(this.currentFileInfo.workspace);
         const convHandle = await workspaceHandle.getDirectoryHandle(this.currentFileInfo.conversation);
-        
+
         let attachmentsFolder;
         try {
           attachmentsFolder = await convHandle.getDirectoryHandle('attachments', { create: false });
@@ -2970,7 +3502,7 @@
           console.log('[ChatGPT Saver] 没有 attachments 文件夹，跳过');
           return;
         }
-        
+
         // 扫描 attachments 文件夹中的文件
         const attachmentFiles = [];
         for await (const entry of attachmentsFolder.values()) {
@@ -2978,25 +3510,25 @@
             attachmentFiles.push(entry);
           }
         }
-        
+
         if (attachmentFiles.length === 0) {
           console.log('[ChatGPT Saver] attachments 文件夹为空');
           return;
         }
-        
+
         console.log(`[ChatGPT Saver] 发现 ${attachmentFiles.length} 个附件文件，准备上传`);
         UI.showToast(`📎 正在上传 ${attachmentFiles.length} 个附件文件...`, 'saving', 0);
-        
+
         // 等待上一次上传完成
         await this.sleep(1000);
-        
+
         // 加载所有附件文件
         const filesToUpload = [];
         for (const fileHandle of attachmentFiles) {
           const file = await fileHandle.getFile();
           filesToUpload.push(file);
         }
-        
+
         // 查找 ChatGPT 的文件输入
         const fileInputs = document.querySelectorAll('input[type="file"]');
         let targetInput = null;
@@ -3006,12 +3538,12 @@
             break;
           }
         }
-        
+
         if (!targetInput) {
           console.error('[ChatGPT Saver] 未找到文件输入框');
           return;
         }
-        
+
         // 创建 DataTransfer 并添加所有文件
         const dataTransfer = new DataTransfer();
         for (const file of filesToUpload) {
@@ -3019,16 +3551,16 @@
           console.log(`[ChatGPT Saver] 添加附件: ${file.name}`);
         }
         targetInput.files = dataTransfer.files;
-        
+
         // 触发事件
         targetInput.dispatchEvent(new Event('change', { bubbles: true }));
         targetInput.dispatchEvent(new Event('input', { bubbles: true }));
-        
+
         await this.sleep(500);
-        
+
         UI.showToast(`✅ 已上传 ${attachmentFiles.length} 个附件文件`, 'success', 3000);
         console.log(`[ChatGPT Saver] ${attachmentFiles.length} 个附件文件上传完成`);
-        
+
       } catch (e) {
         console.error('[ChatGPT Saver] 上传附件失败:', e);
       }
@@ -3057,7 +3589,7 @@
               input.files = dataTransfer.files;
               input.dispatchEvent(new Event('change', { bubbles: true }));
               await this.sleep(500);
-              
+
               // 检查是否有附件出现
               if (this.checkAttachmentAdded()) {
                 console.log('[ChatGPT Saver] 方案A成功: 通过 file input 上传');
@@ -3090,13 +3622,13 @@
             const drop = new DragEvent('drop', {
               bubbles: true, cancelable: true, dataTransfer
             });
-            
+
             target.dispatchEvent(dragEnter);
             target.dispatchEvent(dragOver);
             target.dispatchEvent(drop);
-            
+
             await this.sleep(500);
-            
+
             if (this.checkAttachmentAdded()) {
               console.log('[ChatGPT Saver] 方案A成功: 通过拖放上传');
               return true;
@@ -3123,7 +3655,7 @@
         '[class*="attachment"]',
         '[class*="file-preview"]'
       ];
-      
+
       for (const selector of attachmentSelectors) {
         if (document.querySelector(selector)) {
           return true;
@@ -3142,28 +3674,28 @@
         }
 
         const promptText = this.buildPromptText();
-        
+
         if (input.tagName === 'TEXTAREA') {
           // 设置值
           input.value = promptText;
-          
+
           // 触发多种事件确保 React 感知
           input.dispatchEvent(new Event('input', { bubbles: true }));
           input.dispatchEvent(new Event('change', { bubbles: true }));
-          
+
           // 尝试触发 React 的合成事件
           const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
             window.HTMLTextAreaElement.prototype, 'value'
           ).set;
           nativeInputValueSetter.call(input, promptText);
           input.dispatchEvent(new Event('input', { bubbles: true }));
-          
+
         } else if (input.getAttribute('contenteditable') === 'true') {
           input.innerText = promptText;
-          input.dispatchEvent(new InputEvent('input', { 
-            bubbles: true, 
+          input.dispatchEvent(new InputEvent('input', {
+            bubbles: true,
             inputType: 'insertText',
-            data: promptText 
+            data: promptText
           }));
         }
 
@@ -3187,9 +3719,9 @@
         'textarea[placeholder*="发送"]',
         'form textarea'
       ];
-      
+
       const startTime = Date.now();
-      
+
       while (Date.now() - startTime < timeout) {
         for (const selector of selectors) {
           const el = document.querySelector(selector);
@@ -3197,7 +3729,7 @@
         }
         await this.sleep(200);
       }
-      
+
       return null;
     },
 
@@ -3205,37 +3737,37 @@
     buildPromptText() {
       const data = this.currentContextData;
       const messageCount = data.messages.length;
-      
+
       // 估算 token 数（粗略：1 token ≈ 0.75 中文字或 1 英文单词）
       const totalChars = data.messages.reduce((sum, m) => sum + m.content.length, 0);
       const estimatedTokens = Math.ceil(totalChars / 0.75);
-      
+
       // 阈值：大于 30k tokens 就需要智能摘要
       const MAX_TOKENS = 30000;
-      
+
       let messagesContent;
       let summary = '';
-      
+
       if (estimatedTokens > MAX_TOKENS || messageCount > 50) {
         // 长对话：只保留开头 5 条 + 结尾 10 条，中间摘要
         const firstMessages = data.messages.slice(0, 5);
         const lastMessages = data.messages.slice(-10);
         const middleCount = messageCount - 15;
-        
+
         messagesContent = [
           ...firstMessages.map(m => `【${m.role === 'user' ? '用户' : 'ChatGPT'}】\n${m.content}`),
           `\n[... 中间省略 ${middleCount} 条消息 ...]\n`,
           ...lastMessages.map(m => `【${m.role === 'user' ? '用户' : 'ChatGPT'}】\n${m.content}`)
         ].join('\n\n---\n\n');
-        
+
         summary = `\n⚠️ **注意**：原对话共 ${messageCount} 条消息，估计 ${estimatedTokens.toLocaleString()} tokens。为了适应上下文窗口，已智能压缩：保留开头 5 条和最近 10 条消息。`;
       } else {
         // 短对话：全部保留
-        messagesContent = data.messages.map(m => 
+        messagesContent = data.messages.map(m =>
           `【${m.role === 'user' ? '用户' : 'ChatGPT'}】\n${m.content}`
         ).join('\n\n---\n\n');
       }
-      
+
       return `请基于以下之前的对话上下文继续我们的讨论：
 
 📝 **对话信息**
@@ -3261,7 +3793,7 @@ ${messagesContent}
         'button[aria-label*="Send"]',
         'button[aria-label*="发送"]'
       ];
-      
+
       for (const selector of sendButtonSelectors) {
         const btn = document.querySelector(selector);
         if (btn && !btn.disabled) {
@@ -3270,7 +3802,7 @@ ${messagesContent}
           return;
         }
       }
-      
+
       console.warn('[ChatGPT Saver] 未找到可用的发送按钮');
     },
 
@@ -3285,21 +3817,21 @@ ${messagesContent}
     async checkForUpdate(manual = false) {
       const lastCheck = GM_getValue('lastUpdateCheck', 0);
       const now = Date.now();
-      
+
       // 如果不是手动检查，且距离上次检查不到 3 天，则跳过
       if (!manual && (now - lastCheck) < CONFIG.updateCheckInterval) {
         console.log('[ChatGPT Saver] 距离上次检查不到 3 天，跳过自动检查');
         return null;
       }
-      
+
       if (manual) {
         UI.showToast('⚙️ 正在检查更新...', 'info', 0);
       }
-      
+
       try {
         const remoteVersion = await this.fetchRemoteVersion();
         GM_setValue('lastUpdateCheck', now);
-        
+
         if (!remoteVersion) {
           if (manual) {
             // 网络失败时提供手动检查链接
@@ -3309,9 +3841,9 @@ ${messagesContent}
           }
           return null;
         }
-        
+
         const hasUpdate = this.compareVersions(remoteVersion, CONFIG.currentVersion) > 0;
-        
+
         if (hasUpdate) {
           console.log(`[ChatGPT Saver] 发现新版本: ${remoteVersion} (当前: ${CONFIG.currentVersion})`);
           this.showUpdateNotification(remoteVersion, manual);
@@ -3331,7 +3863,7 @@ ${messagesContent}
         return null;
       }
     },
-    
+
     // 从远程获取版本号（自动尝试多个镜像源）
     fetchRemoteVersion() {
       return new Promise(async (resolve) => {
@@ -3341,12 +3873,12 @@ ${messagesContent}
           resolve(null);
           return;
         }
-        
+
         // 依次尝试每个镜像源
         for (let i = 0; i < CONFIG.updateMirrors.length; i++) {
           const mirrorUrl = CONFIG.updateMirrors[i];
           console.log(`[ChatGPT Saver] 尝试镜像源 ${i + 1}/${CONFIG.updateMirrors.length}: ${mirrorUrl}`);
-          
+
           const result = await this.fetchFromMirror(mirrorUrl);
           if (result) {
             console.log(`[ChatGPT Saver] ✅ 镜像源 ${i + 1} 成功，版本: ${result}`);
@@ -3355,12 +3887,12 @@ ${messagesContent}
           }
           console.log(`[ChatGPT Saver] ❌ 镜像源 ${i + 1} 失败，尝试下一个...`);
         }
-        
+
         console.error('[ChatGPT Saver] 所有镜像源均失败');
         resolve(null);
       });
     },
-    
+
     // 从单个镜像源获取版本
     fetchFromMirror(url) {
       return new Promise((resolve) => {
@@ -3384,12 +3916,12 @@ ${messagesContent}
         });
       });
     },
-    
+
     // 版本号比较：返回 1 表示 v1 > v2，0 表示相等，-1 表示 v1 < v2
     compareVersions(v1, v2) {
       const parts1 = v1.split('.').map(Number);
       const parts2 = v2.split('.').map(Number);
-      
+
       for (let i = 0; i < Math.max(parts1.length, parts2.length); i++) {
         const num1 = parts1[i] || 0;
         const num2 = parts2[i] || 0;
@@ -3398,7 +3930,7 @@ ${messagesContent}
       }
       return 0;
     },
-    
+
     // 显示更新通知
     showUpdateNotification(newVersion, isManual) {
       // 使用 GM_notification 显示系统通知
@@ -3408,14 +3940,14 @@ ${messagesContent}
         timeout: 10000,
         onclick: () => this.openUpdatePage()
       });
-      
+
       // 同时在页面上显示 Toast
       UI.showToast(`🆕 发现新版本 v${newVersion}，点击更新`, 'success', 0);
-      
+
       // 在面板上显示更新按钮
       this.showUpdateButton(newVersion);
     },
-    
+
     // 在面板上显示更新按钮
     showUpdateButton(newVersion) {
       const updateArea = document.getElementById('saver-update-area');
@@ -3434,12 +3966,12 @@ ${messagesContent}
         document.getElementById('saver-do-update').onclick = () => this.openUpdatePage();
       }
     },
-    
+
     // 打开更新页面
     openUpdatePage() {
       window.open('https://github.com/a182860089-pixel/massage', '_blank');
     },
-    
+
     // 显示手动检查指引（网络失败时）
     showManualCheckGuide() {
       const updateArea = document.getElementById('saver-update-area');
@@ -3467,7 +3999,7 @@ ${messagesContent}
         };
       }
     },
-    
+
     // 自动检查（启动时调用）
     autoCheck() {
       // 延迟 5 秒检查，不阻塞页面加载
@@ -3490,7 +4022,7 @@ ${messagesContent}
 
     start(onComplete) {
       console.log('[ChatGPT Saver] Observer.start() 被调用');
-      
+
       // 如果已经在监听，不重复启动
       if (this.isWatching && this.observer) {
         console.log('[ChatGPT Saver] 已经在监听中，跳过');
@@ -3498,7 +4030,7 @@ ${messagesContent}
       }
 
       this.onCompleteCallback = onComplete;
-      
+
       // 切换对话时重置 hash
       const currentURL = window.location.href;
       if (this.previousURL !== currentURL) {
@@ -3521,22 +4053,22 @@ ${messagesContent}
       }
 
       this.retryCount = 0;
-      
+
       // 清理旧的 observer
       if (this.observer) {
         this.observer.disconnect();
       }
 
       this.observer = new MutationObserver(mutations => this.handleMutations(mutations));
-      this.observer.observe(mainEl, { 
-        childList: true, 
-        subtree: true, 
+      this.observer.observe(mainEl, {
+        childList: true,
+        subtree: true,
         characterData: true,
-        attributes: false 
+        attributes: false
       });
       this.isWatching = true;
       console.log('[ChatGPT Saver] ✅ 对话监听已启动 (监听 main 元素)');
-      
+
       UI.updateStatus();
     },
 
@@ -3548,10 +4080,10 @@ ${messagesContent}
           for (const node of m.addedNodes) {
             if (node.nodeType === Node.ELEMENT_NODE) {
               // 检查是否包含消息元素
-              if (node.querySelector && 
-                  (node.querySelector('[data-message-author-role]') ||
-                   node.getAttribute?.('data-message-author-role') ||
-                   node.classList?.contains('group/conversation-turn'))) {
+              if (node.querySelector &&
+                (node.querySelector('[data-message-author-role]') ||
+                  node.getAttribute?.('data-message-author-role') ||
+                  node.classList?.contains('group/conversation-turn'))) {
                 return true;
               }
               // 检查是否是消息容器的更新
@@ -3586,7 +4118,7 @@ ${messagesContent}
 
     checkForCompletion() {
       const isTyping = Parser.isGPTTyping();
-      
+
       if (isTyping) {
         this.debounceTimer = setTimeout(() => this.checkForCompletion(), 1000);
         return;
@@ -3641,7 +4173,7 @@ ${messagesContent}
       this.isWatching = false;
       this.retryCount = 0;
       console.log('[ChatGPT Saver] 对话监听已停止');
-      
+
       UI.updateStatus();
     }
   };
@@ -4144,7 +4676,7 @@ ${messagesContent}
       // 拖动功能
       this.initDraggable(btn);
     },
-    
+
     // 小鹿表情动画
     startDeerAnimations(btn) {
       const blink = () => {
@@ -4152,15 +4684,15 @@ ${messagesContent}
         const eyeLeftClosed = btn.querySelector('.deer-eye-left-closed');
         const eyeRightOpen = btn.querySelector('.deer-eye-right');
         const eyeRightClosed = btn.querySelector('.deer-eye-right-closed');
-        
+
         if (!eyeLeftOpen) return;
-        
+
         // 闭眼
         eyeLeftOpen.style.display = 'none';
         eyeLeftClosed.style.display = 'block';
         eyeRightOpen.style.display = 'none';
         eyeRightClosed.style.display = 'block';
-        
+
         // 150ms 后睁开
         setTimeout(() => {
           eyeLeftOpen.style.display = 'block';
@@ -4169,7 +4701,7 @@ ${messagesContent}
           eyeRightClosed.style.display = 'none';
         }, 150);
       };
-      
+
       // 随机眨眼（2-5秒一次）
       const scheduleBlink = () => {
         const delay = 2000 + Math.random() * 3000;
@@ -4179,38 +4711,38 @@ ${messagesContent}
         }, delay);
       };
       scheduleBlink();
-      
+
       // 悬停时开心大笑
       btn.addEventListener('mouseenter', () => {
         const mouthNormal = btn.querySelector('.deer-mouth');
         const mouthHappy = btn.querySelector('.deer-mouth-happy');
         const blushLeft = btn.querySelector('.deer-blush-left');
         const blushRight = btn.querySelector('.deer-blush-right');
-        
+
         if (mouthNormal) mouthNormal.style.display = 'none';
         if (mouthHappy) mouthHappy.style.display = 'block';
         if (blushLeft) blushLeft.setAttribute('opacity', '0.7');
         if (blushRight) blushRight.setAttribute('opacity', '0.7');
       });
-      
+
       btn.addEventListener('mouseleave', () => {
         const mouthNormal = btn.querySelector('.deer-mouth');
         const mouthHappy = btn.querySelector('.deer-mouth-happy');
         const blushLeft = btn.querySelector('.deer-blush-left');
         const blushRight = btn.querySelector('.deer-blush-right');
-        
+
         if (mouthNormal) mouthNormal.style.display = 'block';
         if (mouthHappy) mouthHappy.style.display = 'none';
         if (blushLeft) blushLeft.setAttribute('opacity', '0.45');
         if (blushRight) blushRight.setAttribute('opacity', '0.45');
       });
     },
-    
+
     initDraggable(btn) {
       let isDragging = false;
       let hasMoved = false;
       let startX, startY, startLeft, startTop;
-      
+
       // 从存储恢复位置
       const savedPos = GM_getValue('btnPosition', null);
       if (savedPos) {
@@ -4219,63 +4751,63 @@ ${messagesContent}
         btn.style.left = savedPos.left + 'px';
         btn.style.top = savedPos.top + 'px';
       }
-      
+
       const onMouseDown = (e) => {
         // 只响应左键
         if (e.button !== 0) return;
-        
+
         isDragging = true;
         hasMoved = false;
         btn.classList.add('dragging');
-        
+
         const rect = btn.getBoundingClientRect();
         startX = e.clientX;
         startY = e.clientY;
         startLeft = rect.left;
         startTop = rect.top;
-        
+
         e.preventDefault();
       };
-      
+
       const onMouseMove = (e) => {
         if (!isDragging) return;
-        
+
         const dx = e.clientX - startX;
         const dy = e.clientY - startY;
-        
+
         // 如果移动距离超过 5px，认为是拖动
         if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
           hasMoved = true;
         }
-        
+
         let newLeft = startLeft + dx;
         let newTop = startTop + dy;
-        
+
         // 限制在视窗内
         const maxX = window.innerWidth - btn.offsetWidth;
         const maxY = window.innerHeight - btn.offsetHeight;
         newLeft = Math.max(0, Math.min(newLeft, maxX));
         newTop = Math.max(0, Math.min(newTop, maxY));
-        
+
         btn.style.right = 'auto';
         btn.style.bottom = 'auto';
         btn.style.left = newLeft + 'px';
         btn.style.top = newTop + 'px';
       };
-      
+
       const onMouseUp = () => {
         if (!isDragging) return;
-        
+
         isDragging = false;
         btn.classList.remove('dragging');
-        
+
         // 保存位置
         if (hasMoved) {
           const rect = btn.getBoundingClientRect();
           GM_setValue('btnPosition', { left: rect.left, top: rect.top });
         }
       };
-      
+
       const onClick = (e) => {
         // 如果刚才拖动过，不触发点击
         if (hasMoved) {
@@ -4286,24 +4818,24 @@ ${messagesContent}
         }
         this.togglePanel();
       };
-      
+
       btn.addEventListener('mousedown', onMouseDown);
       document.addEventListener('mousemove', onMouseMove);
       document.addEventListener('mouseup', onMouseUp);
       btn.addEventListener('click', onClick);
-      
+
       // 触屏支持
       btn.addEventListener('touchstart', (e) => {
         const touch = e.touches[0];
-        onMouseDown({ button: 0, clientX: touch.clientX, clientY: touch.clientY, preventDefault: () => {} });
+        onMouseDown({ button: 0, clientX: touch.clientX, clientY: touch.clientY, preventDefault: () => { } });
       }, { passive: true });
-      
+
       document.addEventListener('touchmove', (e) => {
         if (!isDragging) return;
         const touch = e.touches[0];
         onMouseMove({ clientX: touch.clientX, clientY: touch.clientY });
       }, { passive: true });
-      
+
       document.addEventListener('touchend', onMouseUp);
     },
 
@@ -4319,7 +4851,7 @@ ${messagesContent}
       if (this.toastTimer) clearTimeout(this.toastTimer);
       this.toast.textContent = message;
       this.toast.className = 'show ' + type;
-      
+
       // 让 Toast 跟随悬浮按钮位置
       const btn = document.getElementById('chatgpt-saver-btn');
       if (btn) {
@@ -4329,10 +4861,10 @@ ${messagesContent}
         this.toast.style.right = 'auto';
         this.toast.style.bottom = 'auto';
         this.toast.style.top = 'auto';
-        
+
         const toastHeight = 40; // 预估高度
         const gap = 10;
-        
+
         // 根据按钮位置决定 Toast 显示在上方还是下方
         if (rect.top > toastHeight + gap + 20) {
           // 显示在按钮上方
@@ -4341,13 +4873,13 @@ ${messagesContent}
           // 显示在按钮下方
           this.toast.style.top = (rect.bottom + gap) + 'px';
         }
-        
+
         // 水平居中对齐按钮
         const btnCenterX = rect.left + rect.width / 2;
         this.toast.style.left = btnCenterX + 'px';
         this.toast.style.transform = 'translateX(-50%)' + (this.toast.classList.contains('show') ? '' : ' translateY(10px)');
       }
-      
+
       if (duration > 0) {
         this.toastTimer = setTimeout(() => { this.toast.className = ''; }, duration);
       }
@@ -4359,6 +4891,12 @@ ${messagesContent}
     },
 
     createPanel() {
+      GM_addStyle(`
+        .saver-usage-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 12px; }
+        .saver-usage-item { background: var(--saver-bg); border: 1px solid var(--saver-border); border-radius: 8px; padding: 6px; text-align: center; }
+        .saver-usage-model { font-size: 11px; color: var(--saver-sub-text); margin-bottom: 2px; }
+        .saver-usage-count { font-size: 14px; font-weight: 600; color: #10a37f; }
+      `);
       const panel = document.createElement('div');
       panel.id = 'chatgpt-saver-panel';
       panel.innerHTML = `
@@ -4368,14 +4906,18 @@ ${messagesContent}
           <button id="saver-theme-toggle" style="position: absolute; top: 16px; right: 16px; background: none; border: none; cursor: pointer; font-size: 20px; padding: 0; line-height: 1;">🌞</button>
         </div>
         <div class="saver-panel-content">
+          <div style="font-size: 12px; color: var(--saver-sub-text); margin-bottom: 8px; font-weight: 600;">📊 GPT-5.2 用量统计</div>
+          <div class="saver-usage-stats" id="saver-usage-stats">
+              <div class="saver-usage-item"><div class="saver-usage-model">加载中...</div></div>
+          </div>
           <div class="saver-format-group">
-            <div class="saver-format-btn active" data-format="html">
+            <div class="saver-format-btn ${CONFIG.formats.html ? 'active' : ''}" data-format="html">
               📄<span>HTML</span>
             </div>
-            <div class="saver-format-btn active" data-format="md">
+            <div class="saver-format-btn ${CONFIG.formats.md ? 'active' : ''}" data-format="md">
               📝<span>Markdown</span>
             </div>
-            <div class="saver-format-btn active" data-format="pdf">
+            <div class="saver-format-btn ${CONFIG.formats.pdf ? 'active' : ''}" data-format="pdf">
               📕<span>PDF</span>
             </div>
           </div>
@@ -4529,16 +5071,16 @@ ${messagesContent}
       const html = document.documentElement;
       const btn = document.getElementById('saver-theme-toggle');
       const panel = document.getElementById('chatgpt-saver-panel');
-      
+
       if (this.theme === 'night') {
         html.classList.add('saver-dark');
         // 兼容旧逻辑，给panel也加上（虽然现在变量在root上，但保持以防万一）
-        if(panel) panel.classList.add('saver-dark');
-        if(btn) btn.textContent = '🌙';
+        if (panel) panel.classList.add('saver-dark');
+        if (btn) btn.textContent = '🌙';
       } else {
         html.classList.remove('saver-dark');
-        if(panel) panel.classList.remove('saver-dark');
-        if(btn) btn.textContent = '🌞';
+        if (panel) panel.classList.remove('saver-dark');
+        if (btn) btn.textContent = '🌞';
       }
     },
 
@@ -4624,6 +5166,36 @@ ${messagesContent}
           folderNameEl.style.removeProperty('color'); // 使用 CSS 变量
         }
       }
+    },
+
+    // 更新用量统计
+    updateUsage() {
+      const stats = UsageMonitor.getStats();
+      const container = document.getElementById('saver-usage-stats');
+      if (!container) return;
+
+      let html = '';
+      UsageMonitor.targetModels.forEach(m => {
+        const s = stats[m.id];
+        if (s) {
+          const limit = m.limit || 0;
+          let color = '#10a37f'; // Green
+          if (limit > 0) {
+            const ratio = s.today / limit;
+            if (ratio >= 1.0) color = '#ef4444'; // Red
+            else if (ratio >= 0.8) color = '#f59e0b'; // Orange
+          }
+
+          html += `
+                <div class="saver-usage-item">
+                    <div class="saver-usage-model">${s.name}</div>
+                    <div class="saver-usage-count" style="color: ${color}">
+                        ${s.today}<span style="font-size: 0.85em; opacity: 0.6; color: var(--saver-text);">/${limit}</span>
+                    </div>
+                </div>`;
+        }
+      });
+      container.innerHTML = html;
     }
   };
 
@@ -4657,11 +5229,11 @@ ${messagesContent}
       }
 
       UI.showLog();
-      
+
       const title = conversation.title;
       const workspaceName = Parser.getWorkspaceName();
       const currentMessageCount = conversation.messages.length;
-      
+
       UI.addLog(`📝 对话: ${title}`);
       UI.addLog(`📁 工作空间: ${workspaceName}`);
       UI.addLog(`💬 当前消息数: ${currentMessageCount}`);
@@ -4675,7 +5247,7 @@ ${messagesContent}
           title,
           currentMessageCount
         );
-        
+
         if (!checkResult.needsUpdate) {
           UI.addLog(`✅ 对话已是最新: ${checkResult.path}`);
           UI.addLog(`💬 已保存 ${checkResult.savedCount} 条消息，当前 ${checkResult.currentCount} 条`);
@@ -4683,10 +5255,10 @@ ${messagesContent}
           UI.showToast('😊 无需更新对话哦', 'skip', 3000);
           return;
         }
-        
+
         // 显示正在保存的提示
         UI.showToast('💾 正在保存更新文件...', 'saving', 0);
-        
+
         // 需要更新
         if (checkResult.reason === 'updated') {
           UI.addLog(`🔄 检测到新消息: ${checkResult.savedCount} → ${checkResult.currentCount}`);
@@ -4734,7 +5306,7 @@ ${messagesContent}
 
         // 保存文件
         UI.addLog('💾 开始保存文件...');
-        
+
         if (CONFIG.saveMode === 'folder' && savedFolderHandle) {
           // 保存到分层目录（覆盖旧文件）
           const result = await Utils.saveConversationToFolder(
@@ -4747,21 +5319,84 @@ ${messagesContent}
             CONFIG.formats,
             null  // 不指定 missingFormats，全部保存
           );
-          
+
           if (result.success) {
-            UI.addLog(`✅ 文件已保存到: ${result.path}`);
+            let successMsg = `✅ 文件已保存到: ${result.path}`;
+            if (result.failed && result.failed.length > 0) {
+              successMsg += ` (${result.failed.join(', ')} 保存失败)`;
+            }
+            UI.addLog(successMsg);
             UI.logComplete('保存成功', `${result.saved.join(', ')} → ${result.path}`);
             UI.showToast('✅ 已经成功保存啦', 'success', 3000);
             const count = GM_getValue('savedCount', 0) + 1;
             GM_setValue('savedCount', count);
-            
+
             // 自动保存附件（检测页面上的附件并保存）
             const safeWorkspace = Utils.sanitizeFileName(workspaceName);
             const safeTitle = Utils.sanitizeFileName(title);
             await AttachmentManager.autoSaveAttachments(safeWorkspace, safeTitle);
           } else {
-            UI.logError(result.error || '保存失败');
-            UI.hideToast();
+            // 保存失败
+            UI.addLog(`❌ 保存失败: ${result.error}`);
+
+            // 如果需要重新选择文件夹，清理句柄并回退到下载模式
+            if (result.needReselectFolder) {
+              UI.addLog('⚠️ 文件夹访问失效，正在回退到浏览器下载...');
+
+              // 清理失效的句柄
+              savedFolderHandle = null;
+              CONFIG.saveMode = 'download';
+              UI.updateFolderStatus('浏览器下载');
+
+              // 尝试清理 IndexedDB 中的失效句柄
+              try {
+                const deleteRequest = indexedDB.open('ChatGPTSaverDB', 1);
+                deleteRequest.onsuccess = (event) => {
+                  const db = event.target.result;
+                  if (db.objectStoreNames.contains('handles')) {
+                    const transaction = db.transaction(['handles'], 'readwrite');
+                    const store = transaction.objectStore('handles');
+                    store.delete('folderHandle');
+                  }
+                };
+              } catch (dbError) {
+                console.warn('清理 IndexedDB 失败:', dbError);
+              }
+
+              // 回退到浏览器下载
+              const saved = [];
+              const timestamp = Utils.getTimestamp();
+              const safeWorkspace = Utils.sanitizeFileName(workspaceName);
+              const safeTitle = Utils.sanitizeFileName(title);
+              const baseName = `${safeWorkspace}_${safeTitle}_${timestamp}`;
+
+              if (htmlContent) {
+                Utils.downloadFile(htmlContent, `${baseName}.html`, 'text/html');
+                saved.push('HTML');
+              }
+              if (mdContent) {
+                Utils.downloadFile(mdContent, `${baseName}.md`, 'text/markdown');
+                saved.push('MD');
+              }
+              if (pdfBlob) {
+                Utils.downloadFile(pdfBlob, `${baseName}.pdf`, 'application/pdf');
+                saved.push('PDF');
+              }
+
+              if (saved.length > 0) {
+                UI.addLog(`✅ 已通过浏览器下载: ${saved.join(', ')}`);
+                UI.logComplete('下载成功', `已下载: ${saved.join(', ')}`);
+                UI.showToast('✅ 已通过浏览器下载保存', 'success', 3000);
+                const count = GM_getValue('savedCount', 0) + 1;
+                GM_setValue('savedCount', count);
+              } else {
+                UI.logError('下载也失败了');
+                UI.hideToast();
+              }
+            } else {
+              UI.logError(result.error || '保存失败');
+              UI.hideToast();
+            }
           }
         } else {
           // 回退到浏览器下载
@@ -4770,7 +5405,7 @@ ${messagesContent}
           const safeWorkspace = Utils.sanitizeFileName(workspaceName);
           const safeTitle = Utils.sanitizeFileName(title);
           const baseName = `${safeWorkspace}_${safeTitle}_${timestamp}`;
-          
+
           if (htmlContent) {
             Utils.downloadFile(htmlContent, `${baseName}.html`, 'text/html');
             saved.push('HTML');
@@ -4783,7 +5418,7 @@ ${messagesContent}
             Utils.downloadFile(pdfBlob, `${baseName}.pdf`, 'application/pdf');
             saved.push('PDF');
           }
-          
+
           if (saved.length > 0) {
             UI.logComplete('下载成功', `已下载: ${saved.join(', ')}`);
             UI.showToast('✅ 已经成功保存啦', 'success', 3000);
@@ -4819,21 +5454,21 @@ ${messagesContent}
 
   function startURLWatcher() {
     if (urlCheckInterval) return;
-    
+
     urlCheckInterval = setInterval(() => {
       const currentURL = window.location.href;
       if (currentURL !== lastURL) {
         console.log('[ChatGPT Saver] 检测到URL变化:', currentURL);
         lastURL = currentURL;
-        
+
         // 清空日志区域
         if (UI.clearLog) {
           UI.clearLog();
         }
-        
+
         // 重置 Observer 状态（不停止，只重置 hash）
         Observer.reset();
-        
+
         // 确保监听器运行
         if (!Observer.isWatching) {
           console.log('[ChatGPT Saver] 监听器未运行，重新启动...');
@@ -4849,12 +5484,12 @@ ${messagesContent}
     const originalPushState = history.pushState;
     const originalReplaceState = history.replaceState;
 
-    history.pushState = function(...args) {
+    history.pushState = function (...args) {
       originalPushState.apply(this, args);
       window.dispatchEvent(new Event('locationchange'));
     };
 
-    history.replaceState = function(...args) {
+    history.replaceState = function (...args) {
       originalReplaceState.apply(this, args);
       window.dispatchEvent(new Event('locationchange'));
     };
@@ -4869,13 +5504,13 @@ ${messagesContent}
       const currentURL = window.location.href;
       if (currentURL !== lastURL) {
         lastURL = currentURL;
-        
+
         if (UI.clearLog) {
           UI.clearLog();
         }
-        
+
         Observer.reset();
-        
+
         if (!Observer.isWatching) {
           Observer.start(autoSaveCallback);
         }
@@ -4899,14 +5534,17 @@ ${messagesContent}
     // 尝试恢复文件夹访问权限
     const restoreResult = await Utils.tryRestoreAccess();
     const savedFolderName = GM_getValue('savedFolderName', null);
-    
+
     if (restoreResult.success) {
       console.log('[ChatGPT Saver] 文件夹访问已恢复');
     } else if (restoreResult.needsReauth && restoreResult.handle) {
       pendingReauthHandle = restoreResult.handle;
       console.log('[ChatGPT Saver] 文件夹需要重新授权');
     }
-    
+
+    // 初始化用量统计
+    UsageMonitor.init();
+
     // 初始化附件管理器（恢复收集文件夹）
     await AttachmentManager.init();
     console.log('[ChatGPT Saver] 附件管理器已初始化');
@@ -4916,13 +5554,16 @@ ${messagesContent}
       console.log('[ChatGPT Saver] 开始初始化UI...');
       try {
         UI.init();
-        
+
+        // 更新用量 UI
+        if (UI.updateUsage) UI.updateUsage();
+
         if (restoreResult.success && savedFolderHandle) {
           UI.updateFolderStatus(savedFolderHandle.name, false);
         } else if (restoreResult.needsReauth && savedFolderName) {
           UI.updateFolderStatus(savedFolderName, true);
         }
-        
+
         console.log('[ChatGPT Saver] UI初始化完成');
       } catch (e) {
         console.error('[ChatGPT Saver] UI初始化失败:', e);
@@ -4933,11 +5574,11 @@ ${messagesContent}
     const startObserver = () => {
       console.log('[ChatGPT Saver] 启动全局监听器...');
       Observer.start(autoSaveCallback);
-      
+
       // 启动 URL 监听
       setupHistoryListener();
       startURLWatcher();
-      
+
       // 自动检查更新（每 3 天检查一次）
       UpdateChecker.autoCheck();
     };

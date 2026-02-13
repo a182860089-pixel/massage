@@ -59,6 +59,10 @@ async function handleMessage(request, sender, sendResponse) {
         await chrome.storage.local.set({ savedCount: newCount });
         sendResponse({ success: true, count: newCount });
         break;
+
+      case 'verifyCardKey':
+        await handleVerifyCardKey(request, sendResponse);
+        break;
         
       default:
         sendResponse({ error: '未知操作' });
@@ -96,3 +100,20 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     }
   }
 });
+
+/**
+ * 处理卡密验证（在 background 中发起请求，避免 CORS）
+ */
+async function handleVerifyCardKey(request, sendResponse) {
+  try {
+    const resp = await fetch(request.apiUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ card_key: request.cardKey })
+    });
+    const json = await resp.json();
+    sendResponse(json);
+  } catch (e) {
+    sendResponse({ success: false, message: '网络错误: ' + e.message, data: { valid: false } });
+  }
+}

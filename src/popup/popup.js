@@ -10,6 +10,7 @@ const savedCount = document.getElementById('saved-count');
 const exportHtml = document.getElementById('export-html');
 const exportMd = document.getElementById('export-md');
 const exportPdf = document.getElementById('export-pdf');
+const exportJson = document.getElementById('export-json');
 const toast = document.getElementById('toast');
 
 // 初始化
@@ -44,6 +45,7 @@ async function loadSettings() {
       exportHtml.checked = result.exportFormats.html !== false;
       exportMd.checked = result.exportFormats.md !== false;
       exportPdf.checked = result.exportFormats.pdf !== false;
+      exportJson.checked = result.exportFormats.json !== false;
     }
   } else {
     showSetupSection();
@@ -197,7 +199,8 @@ exportNowBtn.addEventListener('click', async () => {
     const formats = {
       html: exportHtml.checked,
       md: exportMd.checked,
-      pdf: exportPdf.checked
+      pdf: exportPdf.checked,
+      json: exportJson.checked
     };
     
     const response = await chrome.tabs.sendMessage(tab.id, { 
@@ -222,12 +225,13 @@ exportNowBtn.addEventListener('click', async () => {
 });
 
 // 保存导出格式设置
-[exportHtml, exportMd, exportPdf].forEach(checkbox => {
+[exportHtml, exportMd, exportPdf, exportJson].forEach(checkbox => {
   checkbox.addEventListener('change', async () => {
     const formats = {
       html: exportHtml.checked,
       md: exportMd.checked,
-      pdf: exportPdf.checked
+      pdf: exportPdf.checked,
+      json: exportJson.checked
     };
     await chrome.storage.local.set({ exportFormats: formats });
     
@@ -241,4 +245,44 @@ exportNowBtn.addEventListener('click', async () => {
       // 忽略错误
     }
   });
+});
+
+
+// Token 预算显示
+async function loadTokenBudget() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab || (!tab.url.includes('chat.openai.com') && !tab.url.includes('chatgpt.com'))) {
+      return;
+    }
+
+    let response;
+    try {
+      response = await chrome.tabs.sendMessage(tab.id, { action: 'getWorkspaceTokenStats' });
+    } catch (e) {
+      return;
+    }
+
+    if (response && response.workspace) {
+      const wsEl = document.getElementById('token-workspace');
+      const consumedEl = document.getElementById('token-consumed');
+      const progressEl = document.getElementById('token-progress');
+
+      wsEl.textContent = response.workspace;
+      consumedEl.textContent = response.consumed.toLocaleString();
+
+      // 简单进度条（基于估算上限）
+      const maxTokens = 100000; // 默认 100k 上限
+      const pct = Math.min(100, (response.consumed / maxTokens) * 100);
+      progressEl.style.width = pct + '%';
+      progressEl.style.background = pct > 80 ? '#ef4444' : pct > 50 ? '#f59e0b' : '#10a37f';
+    }
+  } catch (e) {
+    // 静默失败
+  }
+}
+
+// 页面加载后获取 token 数据
+document.addEventListener('DOMContentLoaded', () => {
+  setTimeout(loadTokenBudget, 600);
 });

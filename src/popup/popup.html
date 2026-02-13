@@ -80,6 +80,29 @@
             <input type="checkbox" id="export-pdf" checked>
             <span class="format-badge pdf">PDF</span>
           </label>
+          <label class="format-option">
+            <input type="checkbox" id="export-json" checked>
+            <span class="format-badge json">JSON</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="settings-card" id="token-budget-card">
+        <h3>📊 Token 预算</h3>
+        <div class="token-info">
+          <div class="detail-row">
+            <span class="detail-icon">🏢</span>
+            <span class="detail-label">工作空间</span>
+            <span id="token-workspace" class="detail-value">-</span>
+          </div>
+          <div class="detail-row">
+            <span class="detail-icon">🔢</span>
+            <span class="detail-label">已用 Token</span>
+            <span id="token-consumed" class="detail-value">0</span>
+          </div>
+          <div class="token-progress-container">
+            <div id="token-progress" class="token-progress" style="width: 0%"></div>
+          </div>
         </div>
       </div>
 

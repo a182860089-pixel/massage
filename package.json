@@ -1,0 +1,25 @@
+{
+  "name": "chat-massage",
+  "version": "1.0.0",
+  "description": "",
+  "main": "chatgpt-saver.user.js",
+  "scripts": {
+    "test": "vitest --run"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/a182860089-pixel/massage.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/a182860089-pixel/massage/issues"
+  },
+  "homepage": "https://github.com/a182860089-pixel/massage#readme",
+  "devDependencies": {
+    "fast-check": "^4.5.3",
+    "vitest": "^4.0.18"
+  }
+}

@@ -200,6 +200,16 @@ const FileSystemManager = {
   isAuthorized() {
     return this.rootHandle !== null;
   },
+
+  /**
+   * 获取备份根目录句柄
+   */
+  async getBackupRootHandle() {
+    if (!this.rootHandle) return null;
+    try {
+      return await this.rootHandle.getDirectoryHandle(this.backupFolderName, { create: false });
+    } catch (e) { return null; }
+  },
   
   /**
    * 获取或创建文件夹
@@ -252,6 +262,45 @@ const FileSystemManager = {
   },
   
   /**
+   * 检查对话是否需要更新（比较消息数量）
+   */
+  async checkConversationNeedsUpdate(conversationTitle, workspaceName, currentMessageCount) {
+    if (!this.rootHandle) return { needsUpdate: true, reason: 'no_handle', savedCount: 0 };
+    try {
+      const sanitizedTitle = this.sanitizeFileName(conversationTitle);
+      const backupRoot = await this.rootHandle.getDirectoryHandle(this.backupFolderName, { create: false });
+      let parentFolder = backupRoot;
+      if (workspaceName) {
+        const sanitizedWorkspace = this.sanitizeFileName(workspaceName);
+        try { parentFolder = await backupRoot.getDirectoryHandle(sanitizedWorkspace, { create: false }); }
+        catch (e) { return { needsUpdate: true, reason: 'new', savedCount: 0 }; }
+      }
+      let conversationFolder;
+      try { conversationFolder = await parentFolder.getDirectoryHandle(sanitizedTitle, { create: false }); }
+      catch (e) { return { needsUpdate: true, reason: 'new', savedCount: 0 }; }
+      // 尝试读取已保存的 HTML 文件来获取消息数
+      let savedMessageCount = 0;
+      try {
+        const htmlFolder = await conversationFolder.getDirectoryHandle('html', { create: false });
+        const fileHandle = await htmlFolder.getFileHandle(`${sanitizedTitle}.html`, { create: false });
+        const file = await fileHandle.getFile();
+        const htmlContent = await file.text();
+        const match = htmlContent.match(/共\s*(\d+)\s*条消息/);
+        savedMessageCount = match ? parseInt(match[1], 10) : 0;
+      } catch (e) {
+        return { needsUpdate: true, reason: 'no_html', savedCount: 0 };
+      }
+      if (currentMessageCount > savedMessageCount) {
+        return { needsUpdate: true, reason: 'updated', savedCount: savedMessageCount, currentCount: currentMessageCount };
+      }
+      const path = workspaceName ? `${this.sanitizeFileName(workspaceName)}/${sanitizedTitle}` : sanitizedTitle;
+      return { needsUpdate: false, reason: 'unchanged', savedCount: savedMessageCount, currentCount: currentMessageCount, path };
+    } catch (e) {
+      return { needsUpdate: true, reason: 'error', savedCount: 0 };
+    }
+  },
+
+  /**
    * 为对话创建保存目录结构
    * 结构: ChatGPT-Backup/工作空间/对话标题/html, md, pdf
    * 同一对话会覆盖更新，而不是创建新文件夹
@@ -282,12 +331,14 @@ const FileSystemManager = {
     const htmlFolder = await this.getOrCreateFolder(conversationFolder, 'html');
     const mdFolder = await this.getOrCreateFolder(conversationFolder, 'md');
     const pdfFolder = await this.getOrCreateFolder(conversationFolder, 'pdf');
+    const jsonFolder = await this.getOrCreateFolder(conversationFolder, 'json');
     
     return {
       root: conversationFolder,
       html: htmlFolder,
       md: mdFolder,
       pdf: pdfFolder,
+      json: jsonFolder,
       title: sanitizedTitle,
       folderName: folderName,
       workspaceName: workspaceName
@@ -325,7 +376,7 @@ const FileSystemManager = {
    * @param {Object} formats - 导出格式配置
    * @param {string} workspaceName - 工作空间名称（可选）
    */
-  async saveConversation(conversationTitle, htmlContent, mdContent, pdfBlob, formats = { html: true, md: true, pdf: true }, workspaceName = null) {
+  async saveConversation(conversationTitle, htmlContent, mdContent, pdfBlob, formats = { html: true, md: true, pdf: true }, workspaceName = null, jsonContent = null) {
     try {
       const folders = await this.createConversationFolders(conversationTitle, workspaceName);
       const fileName = folders.title;
@@ -351,6 +402,12 @@ const FileSystemManager = {
       if (formats.pdf && pdfBlob) {
         await this.writeFile(folders.pdf, `${fileName}.pdf`, pdfBlob, 'application/pdf');
         results.saved.push('pdf');
+      }
+      
+      // 保存 JSON
+      if (formats.json && jsonContent) {
+        await this.writeFile(folders.json, `${fileName}.json`, jsonContent, 'application/json');
+        results.saved.push('json');
       }
       
       results.title = folders.title;

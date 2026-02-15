@@ -5,6 +5,11 @@
 const PDFExporter = {
   // 最大重试次数
   maxRetries: 2,
+  unicodeFontName: 'NotoSansSC',
+  unicodeFontFile: 'ChatGPTSaver-NotoSansSC-Regular.ttf',
+  unicodeFontBinary: null,
+  unicodeFontLoadingPromise: null,
+  unicodeFontEnabled: false,
   
   /**
    * 检查 PDF 导出是否可用
@@ -24,6 +29,86 @@ const PDFExporter = {
       return 'jsPDF 库未加载';
     }
     return null;
+  },
+
+  _containsNonAscii(text) {
+    return /[^\x00-\x7F]/.test(String(text || ''));
+  },
+
+  _conversationNeedsUnicode(conversation) {
+    if (!conversation || !Array.isArray(conversation.messages)) return false;
+    return conversation.messages.some((msg) =>
+      this._containsNonAscii(msg?.textContent || msg?.content || '')
+    );
+  },
+
+  _arrayBufferToBinaryString(buffer) {
+    const bytes = new Uint8Array(buffer);
+    const chunkSize = 0x8000;
+    let result = '';
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      const chunk = bytes.subarray(i, i + chunkSize);
+      result += String.fromCharCode.apply(null, chunk);
+    }
+    return result;
+  },
+
+  async _loadUnicodeFontBinary() {
+    if (this.unicodeFontBinary) return this.unicodeFontBinary;
+    if (this.unicodeFontLoadingPromise) return this.unicodeFontLoadingPromise;
+
+    const candidates = [];
+    try {
+      if (typeof chrome !== 'undefined' && chrome.runtime?.getURL) {
+        candidates.push(chrome.runtime.getURL('src/lib/NotoSansSC-Regular.ttf'));
+      }
+    } catch (e) {
+      // ignore
+    }
+    candidates.push(
+      'https://cdn.jsdelivr.net/gh/googlefonts/noto-cjk@main/Sans/TTF/SimplifiedChinese/NotoSansSC-Regular.ttf'
+    );
+
+    this.unicodeFontLoadingPromise = (async () => {
+      for (const url of candidates) {
+        try {
+          const resp = await fetch(url, { cache: 'force-cache' });
+          if (!resp.ok) continue;
+          const buf = await resp.arrayBuffer();
+          if (!buf || !buf.byteLength) continue;
+          this.unicodeFontBinary = this._arrayBufferToBinaryString(buf);
+          this.unicodeFontEnabled = true;
+          return this.unicodeFontBinary;
+        } catch (e) {
+          // try next
+        }
+      }
+      this.unicodeFontEnabled = false;
+      this.unicodeFontBinary = null;
+      return null;
+    })();
+
+    const out = await this.unicodeFontLoadingPromise;
+    this.unicodeFontLoadingPromise = null;
+    return out;
+  },
+
+  async ensureUnicodeFont(pdf) {
+    if (!pdf) return false;
+    if (pdf.__saverUnicodeFontReady) return true;
+
+    const binary = await this._loadUnicodeFontBinary();
+    if (!binary) return false;
+
+    try {
+      pdf.addFileToVFS(this.unicodeFontFile, binary);
+      pdf.addFont(this.unicodeFontFile, this.unicodeFontName, 'normal');
+      pdf.__saverUnicodeFontReady = true;
+      return true;
+    } catch (e) {
+      console.warn('[PDF] 注册 Unicode 字体失败:', e?.message || e);
+      return false;
+    }
   },
   
   /**
@@ -79,7 +164,7 @@ const PDFExporter = {
       // 移除临时容器
       document.body.removeChild(container);
       
-      const imgData = canvas.toDataURL('image/jpeg', 0.95);
+      const imgData = canvas.toDataURL('image/png');
       
       // 计算图片在 PDF 中的尺寸
       const imgWidth = contentWidth;
@@ -109,6 +194,8 @@ const PDFExporter = {
         pageCanvas.height = sourceHeight;
         
         const ctx = pageCanvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, pageCanvas.width, pageCanvas.height);
         ctx.drawImage(
           canvas,
           0, sourceY,
@@ -117,13 +204,13 @@ const PDFExporter = {
           canvas.width, sourceHeight
         );
         
-        const pageImgData = pageCanvas.toDataURL('image/jpeg', 0.95);
+        const pageImgData = pageCanvas.toDataURL('image/png');
         const pageImgHeight = (sourceHeight * imgWidth) / canvas.width;
         
         // 添加图片到 PDF
         pdf.addImage(
           pageImgData,
-          'JPEG',
+          'PNG',
           margin,
           margin + headerHeight,
           imgWidth,
@@ -187,9 +274,23 @@ const PDFExporter = {
       background: white;
       font-family: -apple-system, BlinkMacSystemFont, 'Microsoft YaHei', 'Segoe UI', sans-serif;
       padding: 20px;
+      box-sizing: border-box;
       line-height: 1.6;
       font-size: 14px;
     `;
+
+    // 限制原始页面复杂布局类对导出容器的影响，减少异常大空白和截断
+    const resetStyle = document.createElement('style');
+    resetStyle.textContent = `
+      #pdf-export-container * { box-sizing: border-box !important; }
+      #pdf-export-container [hidden],
+      #pdf-export-container [aria-hidden="true"],
+      #pdf-export-container button,
+      #pdf-export-container [class*="copy"] {
+        display: none !important;
+      }
+    `;
+    container.appendChild(resetStyle);
     
     // 添加标题
     const header = document.createElement('div');
@@ -245,40 +346,62 @@ const PDFExporter = {
   formatContent(html) {
     const temp = document.createElement('div');
     temp.innerHTML = html;
-    
+
+    // 移除高风险元素
+    temp.querySelectorAll('script, style, link, iframe, video, audio, button, [class*="copy"], svg').forEach(el => el.remove());
+    // 去除可能导致截断/黑块的布局属性
+    temp.querySelectorAll('*').forEach((el) => {
+      if (!(el instanceof Element)) return;
+      const tag = String(el.tagName || '').toLowerCase();
+      if (tag !== 'a' && tag !== 'img') {
+        Array.from(el.attributes).forEach((attr) => {
+          const n = String(attr.name || '').toLowerCase();
+          if (n === 'style' || n === 'class' || n === 'id' || n.startsWith('data-') || n.startsWith('aria-')) {
+            el.removeAttribute(attr.name);
+          }
+        });
+      }
+      // 移除常见的截断类行为
+      el.style.maxHeight = 'none';
+      el.style.overflow = 'visible';
+      el.style.position = 'static';
+      el.style.filter = 'none';
+      el.style.backdropFilter = 'none';
+      el.style.transform = 'none';
+      el.style.webkitLineClamp = 'unset';
+    });
+
     // 处理代码块
     temp.querySelectorAll('pre').forEach(pre => {
       pre.style.cssText = `
-        background: #1e1e1e;
-        color: #d4d4d4;
+        background: #f3f4f6;
+        color: #111827;
         padding: 12px;
         border-radius: 6px;
-        font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+        border: 1px solid #e5e7eb;
+        font-family: 'Consolas', 'Monaco', 'Menlo', monospace;
         font-size: 12px;
         margin: 10px 0;
         white-space: pre-wrap;
         word-wrap: break-word;
-        overflow-x: auto;
+        overflow-wrap: anywhere;
       `;
     });
-    
+
     // 处理行内代码
     temp.querySelectorAll('code').forEach(code => {
-      if (code.parentElement.tagName !== 'PRE') {
+      if (code.parentElement && String(code.parentElement.tagName || '').toUpperCase() !== 'PRE') {
         code.style.cssText = `
           background: #f3f4f6;
           padding: 2px 5px;
           border-radius: 3px;
-          font-family: 'Monaco', 'Menlo', monospace;
+          font-family: 'Consolas', 'Monaco', monospace;
           font-size: 12px;
-          color: #e11d48;
+          color: #dc2626;
         `;
       }
     });
-    
-    // 移除按钮等
-    temp.querySelectorAll('button, [class*="copy"], svg').forEach(el => el.remove());
-    
+
     return temp.innerHTML;
   },
   
@@ -358,10 +481,11 @@ const PDFExporter = {
   detectPageGaps(canvas, pageHeightPx) {
     if (!canvas || pageHeightPx <= 0) return false;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    const totalPages = Math.ceil(canvas.height / pageHeightPx);
+    const safePageHeight = Math.max(1, Math.floor(pageHeightPx));
+    const totalPages = Math.ceil(canvas.height / safePageHeight);
 
     for (let page = 1; page < totalPages; page++) {
-      const y = page * pageHeightPx;
+      const y = page * safePageHeight;
       const scanStart = Math.max(0, y - 5);
       const scanEnd = Math.min(canvas.height, y + 5);
       const scanHeight = scanEnd - scanStart;
@@ -379,6 +503,113 @@ const PDFExporter = {
       if (allWhite) return true;
     }
     return false;
+  },
+
+  /**
+   * 构建稳定的分页切片计划（使用整数像素步进，避免浮点累计误差）
+   */
+  buildSlicePlan(totalHeightPx, pageHeightPx) {
+    const total = Math.max(0, Math.floor(Number(totalHeightPx) || 0));
+    const page = Math.max(1, Math.floor(Number(pageHeightPx) || 1));
+    const slices = [];
+    let sourceY = 0;
+    while (sourceY < total) {
+      const sourceHeight = Math.min(page, total - sourceY);
+      slices.push({ sourceY, sourceHeight });
+      sourceY += sourceHeight;
+    }
+    return slices;
+  },
+
+  /**
+   * 检测切片中真实内容的上下边界（非近白像素）
+   */
+  detectInkBounds(canvas, sampleStep = 2) {
+    if (!canvas || !canvas.width || !canvas.height) return null;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return null;
+    const { width, height } = canvas;
+    const imageData = ctx.getImageData(0, 0, width, height).data;
+    let top = -1;
+    let bottom = -1;
+
+    for (let y = 0; y < height; y++) {
+      let hasInk = false;
+      for (let x = 0; x < width; x += sampleStep) {
+        const idx = (y * width + x) * 4;
+        const r = imageData[idx];
+        const g = imageData[idx + 1];
+        const b = imageData[idx + 2];
+        const a = imageData[idx + 3];
+        if (a > 5 && (r < 248 || g < 248 || b < 248)) {
+          hasInk = true;
+          break;
+        }
+      }
+      if (hasInk) {
+        if (top === -1) top = y;
+        bottom = y;
+      }
+    }
+
+    if (top === -1 || bottom === -1) return null;
+    return { top, bottom };
+  },
+
+  /**
+   * 裁剪分页切片的顶部/底部大空白，减少“页首大白块”和“页尾被截断”观感问题
+   */
+  trimSliceWhitespace(canvas, options = {}) {
+    if (!canvas || !canvas.width || !canvas.height) return canvas;
+    const trimTop = options.trimTop !== false;
+    const trimBottom = options.trimBottom !== false;
+    const thresholdPx = Math.max(0, Number(options.thresholdPx) || 20);
+    const keepPaddingPx = Math.max(0, Number(options.keepPaddingPx) || 4);
+    const bounds = this.detectInkBounds(canvas, 2);
+    if (!bounds) return canvas;
+
+    const topBlank = bounds.top;
+    const bottomBlank = (canvas.height - 1) - bounds.bottom;
+    const cropTop = trimTop && topBlank > thresholdPx ? Math.max(0, topBlank - keepPaddingPx) : 0;
+    const cropBottom = trimBottom && bottomBlank > thresholdPx ? Math.max(0, bottomBlank - keepPaddingPx) : 0;
+    const newHeight = canvas.height - cropTop - cropBottom;
+    if (newHeight <= 0 || (cropTop === 0 && cropBottom === 0)) return canvas;
+
+    const trimmed = document.createElement('canvas');
+    trimmed.width = canvas.width;
+    trimmed.height = newHeight;
+    const tctx = trimmed.getContext('2d');
+    tctx.fillStyle = '#ffffff';
+    tctx.fillRect(0, 0, trimmed.width, trimmed.height);
+    tctx.drawImage(canvas, 0, cropTop, canvas.width, newHeight, 0, 0, canvas.width, newHeight);
+    return trimmed;
+  },
+
+  /**
+   * 统计 canvas 是否出现“几乎全黑”异常（常见于透明+JPEG 或渲染失败）
+   */
+  isCanvasMostlyBlack(canvas, options = {}) {
+    if (!canvas || !canvas.width || !canvas.height) return false;
+    const sampleStep = Math.max(1, Number(options.sampleStep) || 8);
+    const threshold = Number(options.threshold) || 0.92;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return false;
+    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    let blackCount = 0;
+    let total = 0;
+    for (let y = 0; y < canvas.height; y += sampleStep) {
+      for (let x = 0; x < canvas.width; x += sampleStep) {
+        const idx = (y * canvas.width + x) * 4;
+        const r = data[idx];
+        const g = data[idx + 1];
+        const b = data[idx + 2];
+        const a = data[idx + 3];
+        if (a > 200 && r < 12 && g < 12 && b < 12) blackCount += 1;
+        total += 1;
+      }
+    }
+    if (total === 0) return false;
+    return (blackCount / total) >= threshold;
   },
 
   /**
@@ -415,6 +646,9 @@ const PDFExporter = {
 
         const canvas = await html2canvas(container, { scale: 2, useCORS: true, logging: false, backgroundColor: '#ffffff' });
         document.body.removeChild(container);
+        if (this.isCanvasMostlyBlack(canvas)) {
+          throw new Error('segmented-canvas-mostly-black');
+        }
 
         const imgWidth = contentWidth;
         const imgHeight = (canvas.height * imgWidth) / canvas.width;
@@ -422,7 +656,7 @@ const PDFExporter = {
 
         // 如果整个消息能放进当前页剩余空间
         if (imgHeight <= remainingOnPage) {
-          pdf.addImage(canvas.toDataURL('image/jpeg', 0.92), 'JPEG', margin, currentY, imgWidth, imgHeight);
+          pdf.addImage(canvas.toDataURL('image/png'), 'PNG', margin, currentY, imgWidth, imgHeight);
           currentY += imgHeight + 2;
           continue;
         }
@@ -443,7 +677,7 @@ const PDFExporter = {
           }
 
           const sliceHeightPx = Math.min(
-            Math.round(availableMm * pxPerMm),
+            Math.max(1, Math.floor(availableMm * pxPerMm)),
             canvas.height - sourceYPx
           );
           if (sliceHeightPx <= 0) break;
@@ -451,13 +685,22 @@ const PDFExporter = {
           const sliceCanvas = document.createElement('canvas');
           sliceCanvas.width = canvas.width;
           sliceCanvas.height = sliceHeightPx;
-          sliceCanvas.getContext('2d').drawImage(
+          const sctx = sliceCanvas.getContext('2d');
+          sctx.fillStyle = '#ffffff';
+          sctx.fillRect(0, 0, sliceCanvas.width, sliceCanvas.height);
+          sctx.drawImage(
             canvas, 0, sourceYPx, canvas.width, sliceHeightPx,
             0, 0, canvas.width, sliceHeightPx
           );
 
-          const sliceMmHeight = sliceHeightPx / pxPerMm;
-          pdf.addImage(sliceCanvas.toDataURL('image/jpeg', 0.92), 'JPEG', margin, currentY, imgWidth, sliceMmHeight);
+          const sliceForPdf = this.trimSliceWhitespace(sliceCanvas, {
+            trimTop: sourceYPx > 0,
+            trimBottom: sourceYPx + sliceHeightPx < canvas.height,
+            thresholdPx: 24,
+            keepPaddingPx: 4
+          });
+          const sliceMmHeight = (sliceForPdf.height * imgWidth) / sliceForPdf.width;
+          pdf.addImage(sliceForPdf.toDataURL('image/png'), 'PNG', margin, currentY, imgWidth, sliceMmHeight);
           currentY += sliceMmHeight;
           sourceYPx += sliceHeightPx;
 
@@ -505,7 +748,7 @@ const PDFExporter = {
    */
   async renderBatch(messages, widthPx) {
     const container = document.createElement('div');
-    container.style.cssText = `position:absolute;left:-9999px;top:0;width:${widthPx}px;background:white;font-family:-apple-system,BlinkMacSystemFont,'Microsoft YaHei','Segoe UI',sans-serif;padding:10px;font-size:14px;line-height:1.6;`;
+    container.style.cssText = `position:absolute;left:-9999px;top:0;width:${widthPx}px;background:white;font-family:-apple-system,BlinkMacSystemFont,'Microsoft YaHei','Segoe UI',sans-serif;padding:10px;box-sizing:border-box;font-size:14px;line-height:1.6;`;
 
     for (const msg of messages) {
       const isUser = msg.role === 'user';
@@ -523,6 +766,9 @@ const PDFExporter = {
     });
 
     document.body.removeChild(container);
+    if (this.isCanvasMostlyBlack(canvas)) {
+      throw new Error('batch-canvas-mostly-black');
+    }
     return canvas;
   },
 
@@ -565,7 +811,7 @@ const PDFExporter = {
 
       // 如果整个 canvas 能放进当前页剩余空间，直接放
       if (imgHeight <= remainingOnPage) {
-        pdf.addImage(canvas.toDataURL('image/jpeg', 0.92), 'JPEG', margin, currentY, imgWidth, imgHeight);
+        pdf.addImage(canvas.toDataURL('image/png'), 'PNG', margin, currentY, imgWidth, imgHeight);
         currentY += imgHeight + 2;
         continue;
       }
@@ -588,7 +834,7 @@ const PDFExporter = {
         }
 
         const sliceHeightPx = Math.min(
-          Math.round(availableMm * pxPerMm),
+          Math.max(1, Math.floor(availableMm * pxPerMm)),
           canvas.height - sourceYPx
         );
         if (sliceHeightPx <= 0) break;
@@ -598,14 +844,22 @@ const PDFExporter = {
         sliceCanvas.width = canvas.width;
         sliceCanvas.height = sliceHeightPx;
         const ctx = sliceCanvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, sliceCanvas.width, sliceCanvas.height);
         ctx.drawImage(
           canvas,
           0, sourceYPx, canvas.width, sliceHeightPx,
           0, 0, canvas.width, sliceHeightPx
         );
 
-        const sliceMmHeight = sliceHeightPx / pxPerMm;
-        pdf.addImage(sliceCanvas.toDataURL('image/jpeg', 0.92), 'JPEG', margin, currentY, imgWidth, sliceMmHeight);
+        const sliceForPdf = this.trimSliceWhitespace(sliceCanvas, {
+          trimTop: sourceYPx > 0,
+          trimBottom: sourceYPx + sliceHeightPx < canvas.height,
+          thresholdPx: 24,
+          keepPaddingPx: 4
+        });
+        const sliceMmHeight = (sliceForPdf.height * imgWidth) / sliceForPdf.width;
+        pdf.addImage(sliceForPdf.toDataURL('image/png'), 'PNG', margin, currentY, imgWidth, sliceMmHeight);
         currentY += sliceMmHeight;
         sourceYPx += sliceHeightPx;
 
@@ -767,8 +1021,10 @@ const PDFExporter = {
     const color = options.color || [55, 65, 81];
     const spacingAfter = Number(options.spacingAfter || 2);
     const lineHeight = Number(options.lineHeight || 4.3);
-    const font = options.font || 'helvetica';
+    const fallbackFont = options.font || 'helvetica';
     const style = options.style || 'normal';
+    const shouldUseUnicode = this._containsNonAscii(content) && !!ctx.unicodeFontReady;
+    const font = shouldUseUnicode ? this.unicodeFontName : fallbackFont;
 
     ctx.pdf.setFont(font, style);
     ctx.pdf.setFontSize(fontSize);
@@ -788,7 +1044,8 @@ const PDFExporter = {
     const codeText = String(text || '').replace(/\r/g, '').trim();
     if (!codeText) return;
     const lines = codeText.split('\n');
-    ctx.pdf.setFont('courier', 'normal');
+    const useUnicode = this._containsNonAscii(codeText) && !!ctx.unicodeFontReady;
+    ctx.pdf.setFont(useUnicode ? this.unicodeFontName : 'courier', 'normal');
     ctx.pdf.setFontSize(9.5);
     ctx.pdf.setTextColor(31, 41, 55);
     const wrapped = lines.flatMap(line => ctx.pdf.splitTextToSize(line, ctx.contentWidth - 6));
@@ -941,6 +1198,16 @@ const PDFExporter = {
 
     try {
       const ctx = this._createStructuredContext(conversation.title || 'ChatGPT');
+      const needUnicode = this._conversationNeedsUnicode(conversation);
+      let unicodeReady = false;
+      if (needUnicode) {
+        unicodeReady = await this.ensureUnicodeFont(ctx.pdf);
+        if (!unicodeReady) {
+          console.warn('[PDF] structured 检测到中文/Unicode，但字体加载失败，将回退视觉模式避免乱码');
+          return null;
+        }
+      }
+      ctx.unicodeFontReady = unicodeReady;
       this._writeParagraph(ctx, `导出时间: ${new Date().toLocaleString('zh-CN')} | 共 ${conversation.messages.length} 条消息`, {
         fontSize: 9.5,
         color: [107, 114, 128],
@@ -996,15 +1263,15 @@ const PDFExporter = {
 
     if (conversation.messages.length > 15) {
       try {
-        const result = await this.exportStreamed({ onProgress });
+        const result = await this.exportSegmented();
         if (result) return result;
       } catch (e) {
-        console.warn('[PDF] 流式渲染失败，回退到分段模式:', e.message);
+        console.warn('[PDF] 分段渲染失败，回退到流式模式:', e.message);
       }
       try {
-        return await this.exportSegmented();
+        return await this.exportStreamed({ onProgress });
       } catch (e) {
-        console.error('[PDF] 分段模式也失败:', e);
+        console.error('[PDF] 流式模式也失败:', e);
         return null;
       }
     }
@@ -1026,30 +1293,46 @@ const PDFExporter = {
       });
       document.body.removeChild(container);
 
+      if (this.isCanvasMostlyBlack(canvas)) {
+        console.warn('[PDF] visual 整体 canvas 异常偏黑，自动回退分段模式');
+        return await this.exportSegmented();
+      }
+
       const imgWidth = contentWidth;
       const imgHeight = (canvas.height * imgWidth) / canvas.width;
-      const pageHeightPx = contentHeight * (canvas.height / imgHeight);
+      const pxPerMm = canvas.width / imgWidth;
+      const pageHeightPx = Math.max(1, Math.floor(contentHeight * pxPerMm));
 
       if (this.detectPageGaps(canvas, pageHeightPx)) {
         return await this.exportSegmented();
       }
 
       const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
-      const totalPages = Math.ceil(imgHeight / contentHeight);
+      const slices = this.buildSlicePlan(canvas.height, pageHeightPx);
+      const totalPages = slices.length;
 
       for (let page = 0; page < totalPages; page++) {
         if (page > 0) pdf.addPage();
         this.addHeader(pdf, conversation.title, page + 1, pageWidth, margin);
 
-        const sourceY = page * pageHeightPx;
-        const sourceHeight = Math.min(pageHeightPx, canvas.height - sourceY);
+        const sourceY = slices[page].sourceY;
+        const sourceHeight = slices[page].sourceHeight;
         const pageCanvas = document.createElement('canvas');
         pageCanvas.width = canvas.width;
         pageCanvas.height = sourceHeight;
-        pageCanvas.getContext('2d').drawImage(canvas, 0, sourceY, canvas.width, sourceHeight, 0, 0, canvas.width, sourceHeight);
+        const pctx = pageCanvas.getContext('2d');
+        pctx.fillStyle = '#ffffff';
+        pctx.fillRect(0, 0, pageCanvas.width, pageCanvas.height);
+        pctx.drawImage(canvas, 0, sourceY, canvas.width, sourceHeight, 0, 0, canvas.width, sourceHeight);
 
-        const pageImgHeight = (sourceHeight * imgWidth) / canvas.width;
-        pdf.addImage(pageCanvas.toDataURL('image/jpeg', 0.95), 'JPEG', margin, margin + headerHeight, imgWidth, pageImgHeight);
+        const sliceForPdf = this.trimSliceWhitespace(pageCanvas, {
+          trimTop: page > 0,
+          trimBottom: page < totalPages - 1,
+          thresholdPx: 24,
+          keepPaddingPx: 4
+        });
+        const pageImgHeight = (sliceForPdf.height * imgWidth) / sliceForPdf.width;
+        pdf.addImage(sliceForPdf.toDataURL('image/png'), 'PNG', margin, margin + headerHeight, imgWidth, pageImgHeight);
         this.addFooter(pdf, page + 1, totalPages, pageWidth, pageHeight, margin);
       }
 
@@ -1085,6 +1368,7 @@ const PDFExporter = {
 
     const structured = await this.exportStructured(options);
     if (structured) return structured;
+    console.warn('[PDF] structured 模式不可用或失败，已自动回退 visual 模式');
     return this.exportVisual(options);
   }
 };

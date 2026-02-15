@@ -321,6 +321,7 @@
     updateTimer: null,
     _manualAccountType: null,
     _accountDetectCache: { value: 'unknown', updatedAt: 0 },
+    _seenUsageRequestIds: new Map(),
 
     MODEL_RULES: [
       { id: 'gpt-5-2', label: 'Auto', limit: 10000, windowMs: 3 * 60 * 60 * 1000, aliases: ['auto', 'gpt-5.2', 'gpt-5-2', 'gpt5.2'] },
@@ -576,9 +577,23 @@
       return requests.filter(ts => now - ts <= safeWindow);
     },
 
+    _isDuplicateUsage(metadata = {}) {
+      const requestId = String(metadata?.requestId || '').trim();
+      if (!requestId) return false;
+      const now = Date.now();
+      const cache = this._seenUsageRequestIds;
+      for (const [id, ts] of cache.entries()) {
+        if (now - ts > 15 * 60 * 1000) cache.delete(id);
+      }
+      if (cache.has(requestId)) return true;
+      cache.set(requestId, now);
+      return false;
+    },
+
     recordUsage(rawModelKey, metadata = {}) {
       const modelId = this._normalizeModelKey(rawModelKey);
       if (!modelId) return;
+      if (this._isDuplicateUsage(metadata)) return;
       const ws = this._getWorkspace();
       const wsData = this._ensureWorkspace(ws);
       if (!wsData.models[modelId]) wsData.models[modelId] = { requests: [] };
@@ -738,7 +753,12 @@
     listenForUsage() {
       window.addEventListener('message', (event) => {
         if (event.source !== window || !event.data) return;
-        if ((event.data.type === 'SAVER_USAGE_RECORD' || event.data.type === 'SAVER_USAGE_RECORD_V2') && event.data.modelKey) {
+        if (event.data.type === 'SAVER_USAGE_RECORD_V2' && event.data.modelKey) {
+          this.recordUsage(event.data.modelKey, event.data);
+          return;
+        }
+        if (event.data.type === 'SAVER_USAGE_RECORD' && event.data.modelKey) {
+          // 兼容旧事件：当存在 requestId 时同样可被去重；无 requestId 则作为降级兜底。
           this.recordUsage(event.data.modelKey, event.data);
           return;
         }

@@ -42,7 +42,12 @@
   const postUsage = (modelKey, extra = {}) => {
     const normalized = normalizeModelKey(modelKey);
     if (!normalized) return;
-    window.postMessage({ type: 'SAVER_USAGE_RECORD', modelKey: normalized }, '*');
+    window.postMessage({
+      type: 'SAVER_USAGE_RECORD',
+      modelKey: normalized,
+      requestId: extra?.requestId || null,
+      timestamp: Date.now()
+    }, '*');
     window.postMessage({
       type: 'SAVER_USAGE_RECORD_V2',
       modelKey: normalized,
@@ -75,11 +80,39 @@
     pendingConversationRequests.delete(requestId);
   };
 
-  const isConversationPost = (url, method) => (
-    method === 'POST'
-    && String(url).includes('/conversation')
-    && !String(url).includes('/conversations')
-  );
+  const isConversationPost = (url, method) => {
+    if (method !== 'POST') return false;
+    try {
+      const u = new URL(String(url), location.origin);
+      return /\/conversation$/.test(String(u.pathname || ''));
+    } catch {
+      const text = String(url || '');
+      return text.includes('/conversation') && !text.includes('/conversations');
+    }
+  };
+
+  const isUserSendLikeRequest = (payload) => {
+    if (!payload || typeof payload !== 'object') return false;
+    const action = String(payload.action || '').toLowerCase();
+    const messages = Array.isArray(payload.messages) ? payload.messages : [];
+
+    const hasUserMessage = messages.some((msg) => {
+      const role = String(msg?.author?.role || msg?.role || '').toLowerCase();
+      if (role !== 'user') return false;
+      const content = msg?.content || {};
+      const parts = Array.isArray(content.parts) ? content.parts : [];
+      const hasText = parts.some((part) => {
+        if (typeof part === 'string') return part.trim().length > 0;
+        if (part && typeof part === 'object' && typeof part.text === 'string') return part.text.trim().length > 0;
+        return false;
+      });
+      const hasAttachments = Array.isArray(content.attachments) && content.attachments.length > 0;
+      return hasText || hasAttachments;
+    });
+    if (hasUserMessage) return true;
+    if ((action === 'variant' || action === 'continue') && payload.parent_message_id) return true;
+    return false;
+  };
 
   const getRequestBodyText = async (info, init) => {
     const initBody = init?.body;
@@ -326,26 +359,28 @@
 
       try {
         if (isConversationPost(url, method)) {
-          conversationRequestId = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
           const body = await extractConversationPayload(info, init);
-          const normalized = normalizeModelKey(body?.model);
-          if (normalized && normalized !== 'gpt-5-2') {
-            // 非 Auto 模式可以在请求发起时立即计数，实现实时更新。
-            postUsage(normalized, { source: 'request', requestId: conversationRequestId });
-          } else {
-            // Auto 或无法读取请求体时，等待 SSE 路由结果，超时后兜底。
-            pendingConversationRequests.set(conversationRequestId, {
-              baseModelKey: normalized || null,
-              startedAt: Date.now(),
-              resolved: false
-            });
-            setTimeout(() => {
-              const req = pendingConversationRequests.get(conversationRequestId);
-              if (req && !req.resolved) {
-                if (req.baseModelKey) resolveConversationRequest(conversationRequestId, null, 'request-timeout');
-                else pendingConversationRequests.delete(conversationRequestId);
-              }
-            }, 60 * 1000);
+          if (isUserSendLikeRequest(body)) {
+            conversationRequestId = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+            const normalized = normalizeModelKey(body?.model);
+            if (normalized && normalized !== 'gpt-5-2') {
+              // 非 Auto 模式可以在请求发起时立即计数，实现实时更新。
+              postUsage(normalized, { source: 'request', requestId: conversationRequestId });
+            } else {
+              // Auto 或无法读取请求体时，等待 SSE 路由结果，超时后兜底。
+              pendingConversationRequests.set(conversationRequestId, {
+                baseModelKey: normalized || null,
+                startedAt: Date.now(),
+                resolved: false
+              });
+              setTimeout(() => {
+                const req = pendingConversationRequests.get(conversationRequestId);
+                if (req && !req.resolved) {
+                  if (req.baseModelKey) resolveConversationRequest(conversationRequestId, null, 'request-timeout');
+                  else pendingConversationRequests.delete(conversationRequestId);
+                }
+              }, 60 * 1000);
+            }
           }
         }
       } catch {

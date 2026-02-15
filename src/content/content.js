@@ -26,10 +26,13 @@
     autoSave: true,
     formats: { html: true, md: true, pdf: true, json: true },
     showLogPanel: true,
+    pdfExportMode: 'structured',
     debounceDelay: 2000,
     currentVersion: '3.1',
     cardKeyApiBase: 'https://seat.20050225.xyz'
   };
+
+  const AccessManager = window.ChatGPTSaver.AccessManager;
 
   // ==================== 卡密验证模块 ====================
   const CardKeyManager = {
@@ -232,6 +235,9 @@
       this.recheckInterval = this.defaultRecheckInterval;
       this.stopStatusRecheck();
       await chrome.storage.local.remove(['cardKeyData']);
+      if (AccessManager?.clearCardAccessFallback) {
+        await AccessManager.clearCardAccessFallback();
+      }
     },
 
     normalizeNumber(value) {
@@ -306,79 +312,413 @@
 
   // ==================== 用量统计模块 ====================
   const UsageMonitor = {
-    data: null,
+    STORAGE_KEY: 'usageDataV2',
+    MANUAL_ACCOUNT_KEY: 'accountTypeManualOverride',
     initialized: false,
+    data: null,
+    aliasToModelId: {},
+    updateTimer: null,
+    _manualAccountType: null,
 
-    targetModels: [
-      { id: 'gpt-5-2', name: 'Auto', limit: 10000, window: 3 * 60 * 60 * 1000 },
-      { id: 'gpt-5-2-instant', name: 'Instant', limit: 10000, window: 3 * 60 * 60 * 1000 },
-      { id: 'gpt-5-2-thinking', name: 'Thinking', limit: 3000, window: 7 * 24 * 60 * 60 * 1000 },
-      { id: 'gpt-5-2-pro', name: 'Pro', limit: 15, window: 30 * 24 * 60 * 60 * 1000 }
+    MODEL_RULES: [
+      { id: 'gpt-5-2', label: 'GPT-5.2', limit: 10000, windowMs: 3 * 60 * 60 * 1000, aliases: ['auto', 'gpt-5.2', 'gpt-5-2', 'gpt5.2', 'gpt-5-2-instant'] },
+      { id: 'gpt-5-1', label: 'GPT-5.1', limit: 10000, windowMs: 3 * 60 * 60 * 1000, aliases: ['gpt-5.1', 'gpt-5-1', 'gpt5.1'] },
+      { id: 'gpt-5', label: 'GPT-5', limit: 10000, windowMs: 3 * 60 * 60 * 1000, aliases: ['gpt-5'] },
+      { id: 'gpt-5-thinking', label: 'GPT-5-Thinking', limit: 3000, windowMs: 7 * 24 * 60 * 60 * 1000, aliases: ['gpt-5-thinking', 'gpt-5-2-thinking', 'gpt-5-1-thinking', 'gpt-5-reasoning', 'reasoning'] },
+      { id: 'gpt-5-pro', label: 'GPT-5-Pro', limit: 15, windowMs: 30 * 24 * 60 * 60 * 1000, aliases: ['gpt-5-pro', 'gpt-5-2-pro', 'gpt-5-1-pro'] },
+      { id: 'gpt-4o', label: 'GPT-4o', limit: 80, windowMs: 3 * 60 * 60 * 1000, aliases: ['gpt-4o'] },
+      { id: 'gpt-4', label: 'GPT-4', limit: 40, windowMs: 3 * 60 * 60 * 1000, aliases: ['gpt-4'] },
+      { id: 'gpt-4.1', label: 'GPT-4.1', limit: 80, windowMs: 3 * 60 * 60 * 1000, aliases: ['gpt-4.1', 'gpt-4-1'] },
+      { id: 'o3', label: 'o3', limit: 100, windowMs: 7 * 24 * 60 * 60 * 1000, aliases: ['o3'] },
+      { id: 'o3-pro', label: 'o3-pro', limit: 15, windowMs: 30 * 24 * 60 * 60 * 1000, aliases: ['o3-pro'] },
+      { id: 'o4-mini', label: 'o4-mini', limit: 300, windowMs: 24 * 60 * 60 * 1000, aliases: ['o4-mini'] },
+      { id: 'o4-mini-high', label: 'o4-mini-high', limit: 100, windowMs: 24 * 60 * 60 * 1000, aliases: ['o4-mini-high'] },
+      { id: 'o1-pro', label: 'o1-pro', limit: 50, windowMs: 7 * 24 * 60 * 60 * 1000, aliases: ['o1-pro'] }
     ],
+
+    PLAN_PRESETS: {
+      free: {
+        'gpt-4o': { limit: 10, windowMs: 3 * 60 * 60 * 1000 },
+        'gpt-5-thinking': { limit: 10, windowMs: 5 * 60 * 60 * 1000 },
+        'gpt-5-pro': { limit: 0, windowMs: 30 * 24 * 60 * 60 * 1000 },
+        'o3': { limit: 0, windowMs: 7 * 24 * 60 * 60 * 1000 },
+        'o3-pro': { limit: 0, windowMs: 30 * 24 * 60 * 60 * 1000 }
+      },
+      plus: {},
+      pro: {
+        'gpt-5-pro': { limit: 100, windowMs: 24 * 60 * 60 * 1000 },
+        'o3-pro': { limit: 100, windowMs: 24 * 60 * 60 * 1000 },
+        'gpt-5-thinking': { limit: 10000, windowMs: 3 * 60 * 60 * 1000 }
+      },
+      team: {},
+      enterprise: {
+        'gpt-4o': { limit: 500, windowMs: 3 * 60 * 60 * 1000 },
+        'gpt-4.1': { limit: 500, windowMs: 3 * 60 * 60 * 1000 }
+      },
+      unknown: {}
+    },
+
+    _defaultData() {
+      return {
+        workspaces: {},
+        planType: 'unknown',
+        overrides: {},
+        lastPow: null,
+        accountType: 'unknown'
+      };
+    },
 
     async init() {
       if (this.initialized) return;
       this.initialized = true;
+      this._buildAliasMap();
       await this.loadData();
+      this._hydrateAccountTypeFromPage();
       this.listenForUsage();
+      if (this.updateTimer) clearInterval(this.updateTimer);
+      this.updateTimer = setInterval(() => {
+        if (UI?.updateUsage) UI.updateUsage();
+      }, 30 * 1000);
+    },
+
+    _buildAliasMap() {
+      const map = {};
+      this.MODEL_RULES.forEach((rule) => {
+        map[rule.id.toLowerCase()] = rule.id;
+        (rule.aliases || []).forEach((alias) => {
+          map[String(alias || '').toLowerCase()] = rule.id;
+        });
+      });
+      this.aliasToModelId = map;
+    },
+
+    _normalizeAccountType(type) {
+      const t = String(type || '').toLowerCase().trim();
+      if (['free', 'plus', 'pro', 'team', 'enterprise', 'unknown'].includes(t)) return t;
+      return 'unknown';
+    },
+
+    _normalizeModelKey(modelKey) {
+      const raw = String(modelKey || '').toLowerCase().trim();
+      if (!raw) return null;
+      return this.aliasToModelId[raw] || this.aliasToModelId[raw.replace(/\s+/g, '')] || raw;
+    },
+
+    _hydrateAccountTypeFromPage() {
+      if (this._manualAccountType) return;
+      const detected = this.detectAccountType();
+      if (detected !== 'unknown') {
+        this.data.accountType = detected;
+        this.data.planType = detected;
+        this.saveData();
+      }
     },
 
     _getWorkspace() {
-      try { return window.ChatGPTSaver?.Parser?.getWorkspaceName?.() || '默认'; } catch (e) { return '默认'; }
+      try {
+        return window.ChatGPTSaver?.Parser?.getWorkspaceName?.() || '默认';
+      } catch (e) {
+        return '默认';
+      }
     },
 
     _ensureWorkspace(ws) {
+      if (!this.data) this.data = this._defaultData();
       if (!this.data.workspaces) this.data.workspaces = {};
-      if (!this.data.workspaces[ws]) this.data.workspaces[ws] = { models: {} };
+      if (!this.data.workspaces[ws]) this.data.workspaces[ws] = { models: {}, updatedAt: Date.now() };
       if (!this.data.workspaces[ws].models) this.data.workspaces[ws].models = {};
+      return this.data.workspaces[ws];
     },
 
     async loadData() {
       try {
-        const r = await chrome.storage.local.get(['usageDataByWs']);
-        this.data = r.usageDataByWs || { workspaces: {} };
-        if (!this.data.workspaces) this.data.workspaces = {};
-      } catch (e) { this.data = { workspaces: {} }; }
+        const r = await chrome.storage.local.get([this.STORAGE_KEY, this.MANUAL_ACCOUNT_KEY, 'usageDataByWs']);
+        const migrated = this._migrateFromV1(r.usageDataByWs);
+        this.data = this._normalizeData(r[this.STORAGE_KEY] || migrated || this._defaultData());
+        this._manualAccountType = r[this.MANUAL_ACCOUNT_KEY] ? this._normalizeAccountType(r[this.MANUAL_ACCOUNT_KEY]) : null;
+      } catch (e) {
+        this.data = this._defaultData();
+      }
+    },
+
+    _migrateFromV1(v1Data) {
+      if (!v1Data || typeof v1Data !== 'object' || !v1Data.workspaces) return null;
+      const v2 = this._defaultData();
+      Object.entries(v1Data.workspaces || {}).forEach(([ws, wsData]) => {
+        const models = wsData?.models || {};
+        v2.workspaces[ws] = { models: {}, updatedAt: Date.now() };
+        Object.entries(models).forEach(([rawId, modelState]) => {
+          const normalized = this._normalizeModelKey(rawId);
+          if (!normalized) return;
+          const reqs = Array.isArray(modelState?.requests) ? modelState.requests.filter(n => Number.isFinite(Number(n))).map(n => Number(n)) : [];
+          if (!v2.workspaces[ws].models[normalized]) v2.workspaces[ws].models[normalized] = { requests: [] };
+          v2.workspaces[ws].models[normalized].requests.push(...reqs);
+        });
+      });
+      return v2;
+    },
+
+    _normalizeData(raw) {
+      const data = this._defaultData();
+      const source = raw && typeof raw === 'object' ? raw : {};
+      data.planType = this._normalizeAccountType(source.planType || source.accountType || 'unknown');
+      data.accountType = this._normalizeAccountType(source.accountType || source.planType || 'unknown');
+      data.overrides = source.overrides && typeof source.overrides === 'object' ? source.overrides : {};
+      data.lastPow = source.lastPow && typeof source.lastPow === 'object' ? source.lastPow : null;
+      const workspaces = source.workspaces && typeof source.workspaces === 'object' ? source.workspaces : {};
+      Object.entries(workspaces).forEach(([ws, wsData]) => {
+        const wsModels = wsData?.models && typeof wsData.models === 'object' ? wsData.models : {};
+        data.workspaces[ws] = { models: {}, updatedAt: Number(wsData?.updatedAt || Date.now()) };
+        Object.entries(wsModels).forEach(([modelId, modelState]) => {
+          const requests = Array.isArray(modelState?.requests)
+            ? modelState.requests.map(n => Number(n)).filter(n => Number.isFinite(n))
+            : [];
+          data.workspaces[ws].models[modelId] = { requests };
+        });
+      });
+      return data;
     },
 
     async saveData() {
-      try { await chrome.storage.local.set({ usageDataByWs: this.data }); } catch (e) { /* ignore */ }
-      if (UI && UI.updateUsage) UI.updateUsage();
+      try {
+        await chrome.storage.local.set({ [this.STORAGE_KEY]: this.data });
+      } catch (e) {
+        // ignore
+      }
+      if (UI?.updateUsage) UI.updateUsage();
     },
 
-    recordUsage(modelKey) {
-      if (modelKey === 'gpt-5') modelKey = 'gpt-5-2-instant';
+    getManualAccountType() {
+      return this._manualAccountType || '';
+    },
+
+    async setManualAccountType(type) {
+      if (!this.data) this.data = this._defaultData();
+      const normalized = type ? this._normalizeAccountType(type) : null;
+      this._manualAccountType = normalized;
+      try {
+        if (normalized) {
+          await chrome.storage.local.set({ [this.MANUAL_ACCOUNT_KEY]: normalized });
+        } else {
+          await chrome.storage.local.set({ [this.MANUAL_ACCOUNT_KEY]: null });
+        }
+      } catch (e) {
+        // ignore
+      }
+      if (normalized) {
+        this.data.accountType = normalized;
+        this.data.planType = normalized;
+      } else {
+        const auto = this.detectAccountType();
+        this.data.accountType = auto;
+        this.data.planType = auto;
+      }
+      await this.saveData();
+    },
+
+    detectAccountType() {
+      const bodyText = `${document.body?.innerText || ''} ${document.title || ''}`.toLowerCase();
+      if (/\benterprise|企业版\b/.test(bodyText)) return 'enterprise';
+      if (/\bteam\b/.test(bodyText)) return 'team';
+      if (/\bpro\b/.test(bodyText)) return 'pro';
+      if (/\bplus\b/.test(bodyText)) return 'plus';
+      if (/\bfree|免费版|升级\b/.test(bodyText)) return 'free';
+      return 'unknown';
+    },
+
+    getAccountType() {
+      if (this._manualAccountType) return this._manualAccountType;
+      if (!this.data) return this.detectAccountType();
+      const fromData = this._normalizeAccountType(this.data.accountType || this.data.planType);
+      if (fromData !== 'unknown') return fromData;
+      return this.detectAccountType();
+    },
+
+    _getEffectiveRule(modelId) {
+      const base = this.MODEL_RULES.find(r => r.id === modelId);
+      if (!base) return null;
+      const accountType = this.getAccountType();
+      const preset = this.PLAN_PRESETS[accountType]?.[modelId] || null;
+      const override = this.data.overrides?.[modelId] || null;
+      return {
+        ...base,
+        ...(preset || {}),
+        ...(override || {})
+      };
+    },
+
+    _trimRequestsByWindow(requests, windowMs, now = Date.now()) {
+      const safeWindow = Number(windowMs) > 0 ? Number(windowMs) : 24 * 60 * 60 * 1000;
+      return requests.filter(ts => now - ts <= safeWindow);
+    },
+
+    recordUsage(rawModelKey, metadata = {}) {
+      const modelId = this._normalizeModelKey(rawModelKey);
+      if (!modelId) return;
       const ws = this._getWorkspace();
-      this._ensureWorkspace(ws);
-      const wsModels = this.data.workspaces[ws].models;
-      if (!wsModels[modelKey]) wsModels[modelKey] = { requests: [] };
-      if (!Array.isArray(wsModels[modelKey].requests)) wsModels[modelKey].requests = [];
+      const wsData = this._ensureWorkspace(ws);
+      if (!wsData.models[modelId]) wsData.models[modelId] = { requests: [] };
+      if (!Array.isArray(wsData.models[modelId].requests)) wsData.models[modelId].requests = [];
+
       const now = Date.now();
-      wsModels[modelKey].requests.push(now);
-      const thirtyDays = 30 * 24 * 60 * 60 * 1000;
-      wsModels[modelKey].requests = wsModels[modelKey].requests.filter(t => now - t < thirtyDays);
+      wsData.models[modelId].requests.push(now);
+      const rule = this._getEffectiveRule(modelId);
+      const keepWindow = Math.max(Number(rule?.windowMs || 0), 30 * 24 * 60 * 60 * 1000);
+      wsData.models[modelId].requests = wsData.models[modelId].requests.filter(ts => now - ts <= keepWindow);
+      wsData.updatedAt = now;
+
+      const accountType = this._normalizeAccountType(metadata?.accountType);
+      if (!this._manualAccountType && accountType !== 'unknown') {
+        this.data.accountType = accountType;
+        this.data.planType = accountType;
+      }
+
       this.saveData();
     },
 
-    getStats() {
-      const stats = {};
+    recordRuntimeMetric(metric = {}) {
+      if (!this.data) this.data = this._defaultData();
       const now = Date.now();
+      const powValue = Number(metric.powValue);
+      if (Number.isFinite(powValue) && powValue >= 0) {
+        this.data.lastPow = { powValue, updatedAt: now };
+      } else if (metric.powValue === null) {
+        this.data.lastPow = { powValue: null, updatedAt: now };
+      }
+
+      const accountType = this._normalizeAccountType(metric.accountType);
+      if (!this._manualAccountType && accountType !== 'unknown') {
+        this.data.accountType = accountType;
+        this.data.planType = accountType;
+      }
+
+      this.saveData();
+    },
+
+    evaluateRisk(powValue) {
+      if (!Number.isFinite(powValue)) {
+        return {
+          level: 'unknown',
+          label: '未检测到',
+          advice: '未检测到 PoW 难度值，暂不进行风险评级。',
+          className: 'saver-risk-unknown'
+        };
+      }
+
+      if (powValue >= 700) {
+        return {
+          level: 'high',
+          label: '高风险',
+          advice: 'PoW 偏高，可能触发降级或响应变慢，建议降低并发并间隔请求。',
+          className: 'saver-risk-high'
+        };
+      }
+      if (powValue >= 450) {
+        return {
+          level: 'medium',
+          label: '中风险',
+          advice: 'PoW 较高，建议适当减少长链路请求。',
+          className: 'saver-risk-medium'
+        };
+      }
+      if (powValue >= 250) {
+        return {
+          level: 'low',
+          label: '低风险',
+          advice: 'PoW 略高，建议持续观察。',
+          className: 'saver-risk-low'
+        };
+      }
+      return {
+        level: 'normal',
+        label: '正常',
+        advice: '当前 PoW 难度正常。',
+        className: 'saver-risk-normal'
+      };
+    },
+
+    formatWindow(windowMs) {
+      const ms = Number(windowMs) || 0;
+      if (ms >= 24 * 60 * 60 * 1000) {
+        const days = Math.round(ms / (24 * 60 * 60 * 1000));
+        return `${days}天`;
+      }
+      const hours = Math.round(ms / (60 * 60 * 1000));
+      if (hours > 0) return `${hours}小时`;
+      const mins = Math.max(1, Math.round(ms / (60 * 1000)));
+      return `${mins}分钟`;
+    },
+
+    formatReset(ms) {
+      const safe = Math.max(0, Number(ms) || 0);
+      if (safe <= 1000) return '即将重置';
+      const mins = Math.ceil(safe / (60 * 1000));
+      if (mins < 60) return `${mins}分钟`;
+      const hours = Math.floor(mins / 60);
+      const remainMins = mins % 60;
+      if (hours < 24) return remainMins > 0 ? `${hours}小时${remainMins}分` : `${hours}小时`;
+      const days = Math.floor(hours / 24);
+      const remainHours = hours % 24;
+      return remainHours > 0 ? `${days}天${remainHours}小时` : `${days}天`;
+    },
+
+    getModelStats() {
       const ws = this._getWorkspace();
-      this._ensureWorkspace(ws);
-      const wsModels = this.data.workspaces[ws].models;
-      this.targetModels.forEach(m => {
-        const requests = wsModels[m.id]?.requests || [];
-        const timeWindow = m.window || 24 * 60 * 60 * 1000;
-        stats[m.id] = { today: requests.filter(t => now - t < timeWindow).length, total: requests.length, name: m.name };
+      const now = Date.now();
+      const wsData = this._ensureWorkspace(ws);
+      const wsModels = wsData.models || {};
+
+      return this.MODEL_RULES.map((rule) => {
+        const effective = this._getEffectiveRule(rule.id) || rule;
+        const raw = Array.isArray(wsModels[rule.id]?.requests) ? wsModels[rule.id].requests : [];
+        const inWindow = this._trimRequestsByWindow(raw, effective.windowMs, now);
+        const count = inWindow.length;
+        const limit = Number(effective.limit) || 0;
+        const ratio = limit > 0 ? count / limit : 0;
+        const resetInMs = inWindow.length > 0
+          ? Math.max(0, Number(effective.windowMs || 0) - (now - inWindow[0]))
+          : Number(effective.windowMs || 0);
+        return {
+          id: rule.id,
+          label: rule.label,
+          count,
+          limit,
+          ratio,
+          resetInMs,
+          windowMs: Number(effective.windowMs || 0)
+        };
       });
-      return stats;
+    },
+
+    getSummary() {
+      const modelStats = this.getModelStats();
+      const usedModels = modelStats.filter(s => s.count > 0).length;
+      const totalRequests = modelStats.reduce((sum, s) => sum + s.count, 0);
+      const accountType = this.getAccountType();
+      const lastPow = this.data.lastPow && Object.prototype.hasOwnProperty.call(this.data.lastPow, 'powValue')
+        ? this.data.lastPow.powValue
+        : null;
+      const powRisk = this.evaluateRisk(lastPow);
+      return {
+        accountType,
+        totalRequests,
+        usedModels,
+        modelStats,
+        lastPow,
+        powRisk
+      };
     },
 
     listenForUsage() {
       window.addEventListener('message', (event) => {
         if (event.source !== window || !event.data) return;
-        if (event.data.type === 'SAVER_USAGE_RECORD' && event.data.modelKey) {
-          this.recordUsage(event.data.modelKey);
+        if ((event.data.type === 'SAVER_USAGE_RECORD' || event.data.type === 'SAVER_USAGE_RECORD_V2') && event.data.modelKey) {
+          this.recordUsage(event.data.modelKey, event.data);
+          return;
+        }
+        if (event.data.type === 'SAVER_RUNTIME_METRIC') {
+          const payload = event.data.metric && typeof event.data.metric === 'object' ? event.data.metric : event.data;
+          this.recordRuntimeMetric(payload);
         }
       });
     }
@@ -461,10 +801,20 @@
           --saver-log-header-success-bg: #064e3b; --saver-log-header-success-text: #dcfce7;
           --saver-log-header-error-bg: #7f1d1d; --saver-log-header-error-text: #fee2e2;
         }
-        .saver-usage-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 12px; }
-        .saver-usage-item { background: var(--saver-bg); border: 1px solid var(--saver-border); border-radius: 8px; padding: 6px; text-align: center; }
-        .saver-usage-model { font-size: 11px; color: var(--saver-sub-text); margin-bottom: 2px; }
-        .saver-usage-count { font-size: 14px; font-weight: 600; color: #10a37f; }
+        .saver-usage-stats { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; max-height: 250px; overflow-y: auto; }
+        .saver-usage-item { background: var(--saver-bg); border: 1px solid var(--saver-border); border-radius: 8px; padding: 8px; text-align: left; }
+        .saver-usage-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+        .saver-usage-model { font-size: 12px; color: var(--saver-text); margin: 0; font-weight: 600; }
+        .saver-usage-count { font-size: 12px; font-weight: 600; color: #10a37f; }
+        .saver-usage-meta { font-size: 10px; color: var(--saver-sub-text); line-height: 1.5; }
+        .saver-usage-progress { height: 6px; border-radius: 999px; background: var(--saver-format-active-bg); overflow: hidden; margin-bottom: 4px; }
+        .saver-usage-progress > span { display: block; height: 100%; background: #10a37f; width: 0%; transition: width 0.2s ease; }
+        .saver-risk-badge { display: inline-block; font-size: 10px; padding: 2px 8px; border-radius: 999px; font-weight: 600; }
+        .saver-risk-normal { background: rgba(16,163,127,0.15); color: #10a37f; }
+        .saver-risk-low { background: rgba(59,130,246,0.15); color: #2563eb; }
+        .saver-risk-medium { background: rgba(245,158,11,0.2); color: #b45309; }
+        .saver-risk-high { background: rgba(239,68,68,0.18); color: #dc2626; }
+        .saver-risk-unknown { background: rgba(107,114,128,0.16); color: #4b5563; }
         #chatgpt-saver-btn {
           position: fixed; bottom: 20px; right: 20px; width: 50px; height: 65px;
           background: transparent; border: none; cursor: grab; z-index: 99999;
@@ -581,6 +931,7 @@
         .saver-cardkey-msg.success { color: #10a37f; }
         .saver-cardkey-info { display: inline-block; font-size: 11px; color: var(--saver-sub-text, #666); background: var(--saver-format-active-bg, #f3f4f6); padding: 4px 10px; border-radius: 12px; margin-left: 8px; cursor: pointer; }
         .saver-cardkey-info:hover { opacity: 0.8; }
+        .saver-nav-highlight { outline: 2px solid #10a37f !important; background: rgba(16,163,127,0.1) !important; border-radius: 8px !important; }
         .saver-tpl-editor-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 100000; animation: fadeIn 0.15s ease; }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
         .saver-tpl-editor-dialog { background: var(--saver-bg, #fff); border-radius: 16px; padding: 24px; width: 480px; max-width: 90vw; max-height: 80vh; display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0,0,0,0.3); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: var(--saver-text, #333); }
@@ -648,8 +999,8 @@
           hasMoved = false;
           return;
         }
-        const unavailableMessage = CardKeyManager.getUnavailableMessage();
-        if (!CardKeyManager.canUseNow()) {
+        const unavailableMessage = AccessManager.getUnavailableMessage();
+        if (!AccessManager.canUseNow()) {
           this.showCardKeyOverlay(unavailableMessage);
           return;
         }
@@ -692,11 +1043,23 @@
         <div class="saver-tab-bar">
           <button class="saver-tab active" data-tab="save">💾 保存</button>
           <button class="saver-tab" data-tab="context">🔄 延续</button>
+          <button class="saver-tab" data-tab="nav">🧭 导航</button>
           <button class="saver-tab" data-tab="template">📋 模板</button>
         </div>
         <div class="saver-tab-content active" id="saver-tab-save">
           <div class="saver-panel-content">
-            <div style="font-size: 12px; color: var(--saver-sub-text); margin-bottom: 8px; font-weight: 600;">📊 GPT-5.2 用量统计 <span id="saver-usage-workspace" style="font-weight: 400; opacity: 0.8;"></span></div>
+            <div style="font-size: 12px; color: var(--saver-sub-text); margin-bottom: 8px; font-weight: 600;">📊 模型用量 / 风控 <span id="saver-usage-workspace" style="font-weight: 400; opacity: 0.8;"></span></div>
+            <div style="display:flex;gap:6px;margin-bottom:8px;">
+              <select id="saver-account-type" style="flex:1;padding:6px 8px;border:1px solid var(--saver-border);border-radius:8px;background:var(--saver-format-bg);color:var(--saver-text);font-size:11px;">
+                <option value="">账号类型：自动识别</option>
+                <option value="free">手动：免费版</option>
+                <option value="plus">手动：Plus</option>
+                <option value="pro">手动：Pro</option>
+                <option value="team">手动：Team</option>
+                <option value="enterprise">手动：企业版</option>
+                <option value="unknown">手动：未知</option>
+              </select>
+            </div>
             <div class="saver-usage-stats" id="saver-usage-stats">
               <div class="saver-usage-item"><div class="saver-usage-model">加载中...</div></div>
             </div>
@@ -705,6 +1068,13 @@
               <div class="saver-format-btn ${config.formats.md ? 'active' : ''}" data-format="md">📝<span>Markdown</span></div>
               <div class="saver-format-btn ${config.formats.pdf ? 'active' : ''}" data-format="pdf">📕<span>PDF</span></div>
               <div class="saver-format-btn ${config.formats.json ? 'active' : ''}" data-format="json">📦<span>JSON</span></div>
+            </div>
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;">
+              <span style="font-size:12px;color:var(--saver-sub-text);">PDF 导出模式</span>
+              <select id="saver-pdf-mode" style="flex:1;max-width:180px;padding:6px 8px;border:1px solid var(--saver-border);border-radius:8px;background:var(--saver-format-bg);color:var(--saver-text);font-size:12px;">
+                <option value="structured">结构化（代码/表格/公式）</option>
+                <option value="visual">视觉还原（画布截图）</option>
+              </select>
             </div>
             <button class="saver-action-btn" id="saver-export-btn">💾 立即导出当前对话</button>
             <button class="saver-action-btn secondary" id="saver-selection-btn">✂️ 选择导出</button>
@@ -755,9 +1125,27 @@
             </div>
           </div>
         </div>
+        <div class="saver-tab-content" id="saver-tab-nav">
+          <div class="saver-panel-content">
+            <div style="font-size: 12px; color: var(--saver-sub-text); margin-bottom: 6px; font-weight: 600;">🧭 对话导航</div>
+            <input type="text" id="saver-nav-search" placeholder="🔍 搜索当前对话消息..." style="width:100%;padding:8px 10px;border:1px solid var(--saver-border);border-radius:8px;font-size:12px;outline:none;background:var(--saver-format-bg);color:var(--saver-text);box-sizing:border-box;margin-bottom:8px;" />
+            <div id="saver-nav-stats" style="font-size:11px;color:var(--saver-sub-text);margin-bottom:8px;">加载中...</div>
+            <div id="saver-nav-list" class="saver-context-list">
+              <div class="saver-context-status">正在提取对话消息...</div>
+            </div>
+            <div style="font-size: 12px; color: var(--saver-sub-text); margin: 10px 0 6px; font-weight: 600;">⭐ 收藏（按对话分组）</div>
+            <div id="saver-nav-favorites" class="saver-context-list">
+              <div class="saver-context-status">暂无收藏</div>
+            </div>
+          </div>
+        </div>
         <div class="saver-tab-content" id="saver-tab-template">
           <div class="saver-panel-content">
-            <div style="font-size: 12px; color: var(--saver-sub-text); margin-bottom: 6px; font-weight: 600;">🔄 对话延续模板</div>
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;">
+              <div style="font-size: 12px; color: var(--saver-sub-text); font-weight: 600;">🔄 对话延续模板</div>
+              <button id="saver-ctx-template-add" style="padding:6px 10px;border:1px solid var(--saver-border);border-radius:8px;background:var(--saver-format-bg);color:var(--saver-text);font-size:11px;cursor:pointer;">➕ 新增模板</button>
+            </div>
+            <div style="font-size:11px;color:var(--saver-sub-text);opacity:0.8;margin-bottom:8px;">内置模板支持编辑与恢复默认，自定义模板支持新增/编辑/删除。</div>
             <div id="saver-ctx-template-list" style="overflow-y:auto;margin-bottom:8px;"></div>
           </div>
         </div>
@@ -828,13 +1216,35 @@
         };
       });
 
+      const pdfModeSelect = document.getElementById('saver-pdf-mode');
+      if (pdfModeSelect) {
+        pdfModeSelect.value = config.pdfExportMode || 'structured';
+        pdfModeSelect.onchange = () => {
+          config.pdfExportMode = pdfModeSelect.value || 'structured';
+          chrome.storage.local.set({ pdfExportMode: config.pdfExportMode });
+        };
+      }
+
+      const accountTypeSelect = document.getElementById('saver-account-type');
+      if (accountTypeSelect) {
+        accountTypeSelect.value = UsageMonitor.getManualAccountType() || '';
+        accountTypeSelect.onchange = async () => {
+          await UsageMonitor.setManualAccountType(accountTypeSelect.value || null);
+          this.updateUsage();
+        };
+      }
+
       // 导出按钮 - 手动点击强制导出
       document.getElementById('saver-export-btn').onclick = async () => {
-        const unavailableMessage = CardKeyManager.getUnavailableMessage();
-        if (!CardKeyManager.canUseNow()) { this.showCardKeyOverlay(unavailableMessage); return; }
+        const unavailableMessage = AccessManager.getUnavailableMessage();
+        if (!AccessManager.canUseNow()) { this.showCardKeyOverlay(unavailableMessage); return; }
         if (!window.ChatGPTSaver.Exporter.canExport()) { this.showToast('没有可导出的内容', 'error'); return; }
         this.showToast('💾 正在导出...', 'saving', 0);
-        const result = await window.ChatGPTSaver.Exporter.exportConversation(config.formats, true);
+        const result = await window.ChatGPTSaver.Exporter.exportConversation(
+          config.formats,
+          true,
+          { pdfMode: this.getPDFExportMode() }
+        );
         if (result.success) {
           this.showToast('✅ 导出成功', 'success', 3000);
           updateSavedCount();
@@ -858,8 +1268,8 @@
       };
 
       document.getElementById('saver-export-selected').onclick = async () => {
-        const unavailableMessage = CardKeyManager.getUnavailableMessage();
-        if (!CardKeyManager.canUseNow()) { this.showCardKeyOverlay(unavailableMessage); return; }
+        const unavailableMessage = AccessManager.getUnavailableMessage();
+        if (!AccessManager.canUseNow()) { this.showCardKeyOverlay(unavailableMessage); return; }
         const sm = window.ChatGPTSaver.SelectionManager;
         if (!sm || sm.selectedCount() === 0) return;
         const allMessages = window.ChatGPTSaver.Parser.parseConversation().messages;
@@ -919,6 +1329,8 @@
           tab.classList.add('active');
           document.getElementById('saver-tab-' + tab.dataset.tab).classList.add('active');
           if (tab.dataset.tab === 'context') ContextManager.refreshList();
+          if (tab.dataset.tab === 'nav') ChatNavigator.refresh();
+          if (tab.dataset.tab === 'template') this._refreshTemplateList();
         };
       });
 
@@ -947,15 +1359,10 @@
         });
       }
 
-      // 模板功能
-      // Tab 切换时刷新模板列表
-      panel.querySelectorAll('.saver-tab').forEach(tab => {
-        const origHandler = tab.onclick;
-        tab.onclick = () => {
-          if (origHandler) origHandler();
-          if (tab.dataset.tab === 'template') this._refreshTemplateList();
-        };
-      });
+      const addTplBtn = document.getElementById('saver-ctx-template-add');
+      if (addTplBtn) {
+        addTplBtn.onclick = () => this._showTemplateEditor(null, { create: true });
+      }
 
     },
 
@@ -973,17 +1380,16 @@
       let overlay = document.getElementById('saver-cardkey-overlay');
       if (overlay) {
         overlay.style.display = 'flex';
-        const keyInput = document.getElementById('saver-cardkey-input');
-        const emailInput = document.getElementById('saver-cardkey-email-input');
         const msg = document.getElementById('saver-cardkey-msg');
-        if (keyInput) keyInput.value = CardKeyManager.cardData?.card_key || '';
-        if (emailInput) emailInput.value = CardKeyManager.cardData?.email || '';
         if (msg) {
           msg.textContent = message;
           msg.className = message ? 'saver-cardkey-msg error' : 'saver-cardkey-msg';
         }
+        const defaultMode = AccessManager.hasUsedGuestTrial() && AccessManager.hasGuestTrialExpired() ? 'card' : 'choice';
+        this._switchAccessOverlayMode(defaultMode);
         return;
       }
+
       overlay = document.createElement('div');
       overlay.id = 'saver-cardkey-overlay';
       overlay.className = 'saver-cardkey-overlay';
@@ -992,12 +1398,22 @@
           <button id="saver-cardkey-close" style="position: absolute; top: 12px; right: 12px; background: none; border: none; font-size: 20px; cursor: pointer; color: var(--saver-sub-text, #999); line-height: 1; padding: 4px;">✕</button>
           <img src="${chrome.runtime.getURL('icons/logo.jpg')}" style="width: 80px; height: 80px; border-radius: 50%; margin: 0 auto 12px; display: block; box-shadow: 0 4px 12px rgba(0,0,0,0.1); object-fit: cover;" />
           <h3>激活 ChatGPT 对话保存助手</h3>
-          <p>请输入卡密和邮箱，绑定当前设备</p>
-          <input type="text" class="saver-cardkey-input" id="saver-cardkey-input" placeholder="请输入卡密" autocomplete="off" />
-          <input type="email" class="saver-cardkey-input" id="saver-cardkey-email-input" placeholder="请输入绑定邮箱" autocomplete="off" style="margin-top: 10px;" />
-          <div class="saver-cardkey-btn-row">
-            <button class="saver-cardkey-btn" id="saver-cardkey-submit">🔑 验证激活</button>
-            <button class="saver-cardkey-btn secondary" id="saver-cardkey-rebind">🔄 换绑设备</button>
+          <div id="saver-access-choice" style="display:none;">
+            <p style="margin-bottom: 12px;">请选择激活方式</p>
+            <div class="saver-cardkey-btn-row" style="margin-bottom: 10px;">
+              <button class="saver-cardkey-btn" id="saver-access-card">🔑 卡密激活</button>
+              <button class="saver-cardkey-btn secondary" id="saver-access-guest">🆓 游客登录（免费1天）</button>
+            </div>
+          </div>
+          <div id="saver-card-form" style="display:none;">
+            <p>请输入卡密和邮箱，绑定当前设备</p>
+            <input type="text" class="saver-cardkey-input" id="saver-cardkey-input" placeholder="请输入卡密" autocomplete="off" />
+            <input type="email" class="saver-cardkey-input" id="saver-cardkey-email-input" placeholder="请输入绑定邮箱" autocomplete="off" style="margin-top: 10px;" />
+            <div class="saver-cardkey-btn-row">
+              <button class="saver-cardkey-btn" id="saver-cardkey-submit">🔑 验证激活</button>
+              <button class="saver-cardkey-btn secondary" id="saver-cardkey-rebind">🔄 换绑设备</button>
+            </div>
+            <button id="saver-card-back" style="margin-top:6px;background:none;border:none;color:var(--saver-sub-text);cursor:pointer;font-size:12px;">← 返回方式选择</button>
           </div>
           <div class="saver-cardkey-msg" id="saver-cardkey-msg">${message}</div>
         </div>
@@ -1007,24 +1423,44 @@
       // 关闭按钮
       document.getElementById('saver-cardkey-close').onclick = () => { overlay.style.display = 'none'; };
 
+      const choicePanel = document.getElementById('saver-access-choice');
+      const cardPanel = document.getElementById('saver-card-form');
+      const cardModeBtn = document.getElementById('saver-access-card');
+      const guestModeBtn = document.getElementById('saver-access-guest');
+      const backBtn = document.getElementById('saver-card-back');
       const input = document.getElementById('saver-cardkey-input');
       const emailInput = document.getElementById('saver-cardkey-email-input');
       const btn = document.getElementById('saver-cardkey-submit');
       const rebindBtn = document.getElementById('saver-cardkey-rebind');
       const msg = document.getElementById('saver-cardkey-msg');
 
+      this._switchAccessOverlayMode = (mode) => {
+        const finalMode = mode === 'card' ? 'card' : 'choice';
+        if (choicePanel) choicePanel.style.display = finalMode === 'choice' ? 'block' : 'none';
+        if (cardPanel) cardPanel.style.display = finalMode === 'card' ? 'block' : 'none';
+        if (finalMode === 'card') {
+          input.value = CardKeyManager.cardData?.card_key || '';
+          emailInput.value = CardKeyManager.cardData?.email || '';
+          (input.value ? emailInput : input).focus();
+        }
+      };
+
       const resetButtonState = () => {
         btn.disabled = false;
         rebindBtn.disabled = false;
+        if (guestModeBtn) guestModeBtn.disabled = false;
         btn.textContent = '🔑 验证激活';
         rebindBtn.textContent = '🔄 换绑设备';
+        if (guestModeBtn) guestModeBtn.textContent = '🆓 游客登录（免费1天）';
       };
 
       const setLoadingState = (mode) => {
         btn.disabled = true;
         rebindBtn.disabled = true;
+        if (guestModeBtn) guestModeBtn.disabled = true;
         btn.textContent = mode === 'activate' ? '⏳ 激活中...' : '🔑 验证激活';
         rebindBtn.textContent = mode === 'rebind' ? '⏳ 换绑中...' : '🔄 换绑设备';
+        if (guestModeBtn) guestModeBtn.textContent = mode === 'guest' ? '⏳ 登录中...' : '🆓 游客登录（免费1天）';
       };
 
       const getFormValue = () => {
@@ -1061,13 +1497,14 @@
         return raw || '卡密无效';
       };
 
-      const onSuccess = () => {
+      const onSuccess = async () => {
         msg.textContent = getSuccessMessageByCardType();
         msg.className = 'saver-cardkey-msg success';
         btn.textContent = '✅ 已激活';
         rebindBtn.textContent = '✅ 已换绑';
+        await AccessManager.onCardActivated();
         this.updateCardKeyBadge();
-        initAfterCardKey();
+        await initAfterCardKey();
         setTimeout(() => {
           overlay.style.display = 'none';
           resetButtonState();
@@ -1080,6 +1517,27 @@
         resetButtonState();
       };
 
+      const doGuestLogin = async () => {
+        setLoadingState('guest');
+        msg.textContent = '';
+        const clientId = CardKeyManager.clientId || (await CardKeyManager.ensureClientId?.());
+        const result = await AccessManager.activateGuestTrial(clientId);
+        if (!result.success) {
+          onFailure(result.message || '游客试用不可用');
+          this._switchAccessOverlayMode('card');
+          return;
+        }
+
+        msg.textContent = '✅ 游客登录成功，已开启 24 小时试用';
+        msg.className = 'saver-cardkey-msg success';
+        this.updateCardKeyBadge();
+        await initAfterCardKey();
+        setTimeout(() => {
+          overlay.style.display = 'none';
+          resetButtonState();
+        }, 700);
+      };
+
       const doActivate = async () => {
         const formData = getFormValue();
         if (!formData) return;
@@ -1087,7 +1545,7 @@
         msg.textContent = '';
         const result = await CardKeyManager.activate(formData.key, formData.email);
         if (result.valid) {
-          onSuccess();
+          await onSuccess();
         } else {
           onFailure(result.message || '激活失败');
         }
@@ -1100,19 +1558,22 @@
         msg.textContent = '';
         const result = await CardKeyManager.rebind(formData.key, formData.email);
         if (result.valid) {
-          onSuccess();
+          await onSuccess();
         } else {
           onFailure(result.message || '换绑失败');
         }
       };
 
-      input.value = CardKeyManager.cardData?.card_key || '';
-      emailInput.value = CardKeyManager.cardData?.email || '';
       btn.onclick = doActivate;
       rebindBtn.onclick = doRebind;
       input.addEventListener('keydown', (e) => { if (e.key === 'Enter') doActivate(); });
       emailInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doActivate(); });
-      (input.value ? emailInput : input).focus();
+      if (cardModeBtn) cardModeBtn.onclick = () => this._switchAccessOverlayMode('card');
+      if (backBtn) backBtn.onclick = () => this._switchAccessOverlayMode('choice');
+      if (guestModeBtn) guestModeBtn.onclick = doGuestLogin;
+
+      const defaultMode = AccessManager.hasUsedGuestTrial() && AccessManager.hasGuestTrialExpired() ? 'card' : 'choice';
+      this._switchAccessOverlayMode(defaultMode);
     },
 
     hideCardKeyOverlay() {
@@ -1123,8 +1584,17 @@
     updateCardKeyBadge() {
       const badge = document.getElementById('saver-cardkey-badge');
       if (!badge) return;
-      if (!CardKeyManager.canUseNow()) {
+
+      if (!AccessManager.canUseNow()) {
         badge.style.display = 'none';
+        return;
+      }
+
+      const accessBadge = AccessManager.getBadgeInfo();
+      if (accessBadge.type === 'guest') {
+        badge.style.display = 'inline-block';
+        badge.textContent = accessBadge.text || '🆓 游客试用';
+        badge.style.color = accessBadge.color || '';
         return;
       }
 
@@ -1181,6 +1651,10 @@
     updateFolderStatus(name) {
       const el = document.getElementById('saver-folder-name');
       if (el) el.textContent = name ? '📂 ' + name : '未设置';
+    },
+
+    getPDFExportMode() {
+      return config.pdfExportMode || 'structured';
     },
 
     showLog() {
@@ -1246,10 +1720,15 @@
     },
 
     updateUsage() {
-      const stats = UsageMonitor.getStats();
+      const summary = UsageMonitor.getSummary();
       const container = document.getElementById('saver-usage-stats');
       const wsLabel = document.getElementById('saver-usage-workspace');
       if (!container) return;
+
+      const accountTypeSelect = document.getElementById('saver-account-type');
+      if (accountTypeSelect) {
+        accountTypeSelect.value = UsageMonitor.getManualAccountType() || '';
+      }
 
       // 显示当前工作空间名
       try {
@@ -1257,34 +1736,51 @@
         if (wsLabel) wsLabel.textContent = wsName ? `· ${wsName}` : '';
       } catch (e) { /* ignore */ }
 
+      const accountLabels = {
+        free: '免费版',
+        plus: 'Plus',
+        pro: 'Pro',
+        team: 'Team',
+        enterprise: '企业版',
+        unknown: '未知'
+      };
+
+      const powText = Number.isFinite(summary.lastPow) ? String(summary.lastPow) : '未检测到';
       let html = '';
-      UsageMonitor.targetModels.forEach(m => {
-        const s = stats[m.id];
-        if (s) {
-          const limit = m.limit || 0;
-          let color = '#10a37f';
-          if (limit > 0) {
-            const ratio = s.today / limit;
-            if (ratio >= 1.0) color = '#ef4444';
-            else if (ratio >= 0.8) color = '#f59e0b';
-          }
-          html += `<div class="saver-usage-item"><div class="saver-usage-model">${s.name}</div><div class="saver-usage-count" style="color: ${color}">${s.today}<span style="font-size: 0.85em; opacity: 0.6; color: var(--saver-text);">/${limit}</span></div></div>`;
+      html += `<div class="saver-usage-item">
+        <div class="saver-usage-head">
+          <div class="saver-usage-model">账号：${accountLabels[summary.accountType] || '未知'}</div>
+          <span class="saver-risk-badge ${summary.powRisk.className}">${summary.powRisk.label}</span>
+        </div>
+        <div class="saver-usage-meta">总请求：${summary.totalRequests} · 已用模型：${summary.usedModels}/${summary.modelStats.length}</div>
+        <div class="saver-usage-meta">PoW：${powText} · ${summary.powRisk.advice}</div>
+      </div>`;
+
+      summary.modelStats.forEach((stat) => {
+        const ratio = stat.limit > 0 ? stat.ratio : 0;
+        const pct = Math.max(0, Math.min(100, Math.round(ratio * 100)));
+        let color = '#10a37f';
+        if (stat.limit > 0) {
+          if (ratio >= 1) color = '#ef4444';
+          else if (ratio >= 0.8) color = '#f59e0b';
+          else if (ratio >= 0.5) color = '#3b82f6';
         }
+        html += `<div class="saver-usage-item">
+          <div class="saver-usage-head">
+            <div class="saver-usage-model">${stat.label}</div>
+            <div class="saver-usage-count" style="color:${color};">${stat.count}${stat.limit > 0 ? `<span style="opacity:0.6;color:var(--saver-text);">/${stat.limit}</span>` : ''}</div>
+          </div>
+          <div class="saver-usage-progress"><span style="width:${pct}%;background:${color};"></span></div>
+          <div class="saver-usage-meta">周期：${UsageMonitor.formatWindow(stat.windowMs)} · 重置：${UsageMonitor.formatReset(stat.resetInMs)}</div>
+        </div>`;
       });
 
-      // 添加当前工作空间的已保存次数
-      const savedEl = document.getElementById('saver-ws-saved-count');
-      if (savedEl) {
-        // 异步更新保存次数
-        this._refreshSavedCount();
-      } else {
-        // 首次渲染，追加已保存卡片
-        html += `<div class="saver-usage-item" style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; gap: 6px; padding: 4px 6px;">
-          <div class="saver-usage-model" style="margin: 0;">💾 已保存</div>
-          <div class="saver-usage-count" id="saver-ws-saved-count" style="margin: 0; font-size: 13px;">0</div>
-          <div class="saver-usage-model" style="margin: 0;">次</div>
-        </div>`;
-      }
+      html += `<div class="saver-usage-item">
+        <div class="saver-usage-head">
+          <div class="saver-usage-model">💾 当前空间已保存</div>
+          <div class="saver-usage-count" id="saver-ws-saved-count" style="font-size:13px;">0</div>
+        </div>
+      </div>`;
 
       container.innerHTML = html;
       this._refreshSavedCount();
@@ -1360,161 +1856,192 @@
     },
 
     async _refreshTemplateList() {
-      // 渲染预设延续模板
-      this._refreshCtxTemplateList();
+      await this._refreshCtxTemplateList();
     },
 
-    _refreshCtxTemplateList() {
+    async _refreshCtxTemplateList() {
       const listEl = document.getElementById('saver-ctx-template-list');
       if (!listEl) return;
       const lang = ContextPromptTemplates._lang;
-      const templates = ContextPromptTemplates.templates;
-      const selectedIdx = ContextPromptTemplates._selectedIdx;
+      const templates = ContextPromptTemplates.getAllTemplates();
+      const selectedTemplate = ContextPromptTemplates.getSelectedTemplate();
+      const selectedId = selectedTemplate?.id;
 
-      listEl.innerHTML = templates.map((t, i) => {
-        const preview = (t.prompt[lang] || '').substring(0, 60).replace(/\{title\}/g, '…').replace(/\{msgCount\}/g, 'N').replace(/\{attNote\}/g, '') + '...';
-        const isActive = i === selectedIdx;
-        return `<div class="saver-context-item" data-ctx-tpl-idx="${i}" style="cursor:pointer;${isActive ? 'border-color:#10a37f;background:var(--saver-format-active-bg);' : ''}">
-          <span class="ctx-icon" style="font-size:14px;">${isActive ? '✅' : '⚪'}</span>
+      listEl.innerHTML = templates.map((tpl) => {
+        const previewSource = String(tpl.prompt?.[lang] || tpl.prompt?.zh || '');
+        const preview = `${previewSource.substring(0, 80).replace(/\{title\}/g, '…').replace(/\{msgCount\}/g, 'N').replace(/\{attNote\}/g, '')}${previewSource.length > 80 ? '...' : ''}`;
+        const safeName = this._escapeHtml(tpl.name?.[lang] || tpl.name?.zh || tpl.name?.en || '未命名模板');
+        const safePreview = this._escapeHtml(preview);
+        const isActive = tpl.id === selectedId;
+        const rightBtns = tpl.builtin
+          ? `<button class="saver-ctx-tpl-edit" data-id="${tpl.id}" style="background:none;border:none;cursor:pointer;font-size:14px;flex-shrink:0;" title="编辑">✏️</button>`
+          : `<div style="display:flex;gap:4px;align-items:center;">
+              <button class="saver-ctx-tpl-edit" data-id="${tpl.id}" style="background:none;border:none;cursor:pointer;font-size:14px;flex-shrink:0;" title="编辑">✏️</button>
+              <button class="saver-ctx-tpl-del" data-id="${tpl.id}" style="background:none;border:none;cursor:pointer;font-size:14px;flex-shrink:0;color:#ef4444;" title="删除">🗑️</button>
+            </div>`;
+        return `<div class="saver-context-item" data-ctx-tpl-id="${tpl.id}" style="cursor:pointer;${isActive ? 'border-color:#10a37f;background:var(--saver-format-active-bg);' : ''}">
+          <span class="ctx-icon" style="font-size:14px;">${isActive ? '✅' : (tpl.builtin ? '📌' : '🧩')}</span>
           <div class="ctx-info">
-            <div class="ctx-title" style="font-size:12px;">${t.name[lang]}</div>
-            <div class="ctx-meta">${preview}</div>
+            <div class="ctx-title" style="font-size:12px;">${safeName}</div>
+            <div class="ctx-meta">${safePreview}</div>
           </div>
-          <button class="saver-ctx-tpl-edit" data-idx="${i}" style="background:none;border:none;cursor:pointer;font-size:14px;flex-shrink:0;" title="编辑">✏️</button>
+          ${rightBtns}
         </div>`;
       }).join('');
 
-      // 点击选中模板
       listEl.querySelectorAll('.saver-context-item').forEach(item => {
-        item.onclick = (e) => {
-          if (e.target.closest('.saver-ctx-tpl-edit')) return;
-          const idx = parseInt(item.dataset.ctxTplIdx);
-          ContextPromptTemplates._selectedIdx = idx;
-          try { chrome.storage.local.set({ ctxPromptIdx: idx }); } catch (err) { /* ignore */ }
-          // 同步更新延续 tab 的下拉框
+        item.onclick = async (e) => {
+          if (e.target.closest('.saver-ctx-tpl-edit') || e.target.closest('.saver-ctx-tpl-del')) return;
+          const templateId = item.dataset.ctxTplId;
+          await ContextPromptTemplates.selectTemplate(templateId);
           const sel = document.getElementById('saver-ctx-prompt-select');
-          if (sel) sel.value = idx;
-          this._refreshCtxTemplateList();
+          if (sel) sel.value = templateId;
+          await this._refreshCtxTemplateList();
           this.showToast('✅ 已切换延续模板', 'success');
         };
       });
 
-      // 编辑模板
       listEl.querySelectorAll('.saver-ctx-tpl-edit').forEach(btn => {
-        btn.onclick = (e) => {
+        btn.onclick = async (e) => {
           e.stopPropagation();
-          const idx = parseInt(btn.dataset.idx);
-          const tpl = templates[idx];
+          const templateId = btn.dataset.id;
+          const tpl = templates.find(t => t.id === templateId);
           if (!tpl) return;
-          this._showTemplateEditor(idx, tpl, lang);
+          this._showTemplateEditor(tpl, { create: false });
+        };
+      });
+
+      listEl.querySelectorAll('.saver-ctx-tpl-del').forEach(btn => {
+        btn.onclick = async (e) => {
+          e.stopPropagation();
+          const templateId = btn.dataset.id;
+          const tpl = templates.find(t => t.id === templateId);
+          if (!tpl || tpl.builtin) return;
+          const ok = window.confirm(`确认删除模板「${tpl.name?.[lang] || tpl.name?.zh || '未命名'}」吗？`);
+          if (!ok) return;
+          const removed = await ContextPromptTemplates.removeCustomTemplate(templateId);
+          if (removed) {
+            await this._refreshCtxTemplateList();
+            this.showToast('✅ 模板已删除', 'success');
+          } else {
+            this.showToast('❌ 删除失败', 'error');
+          }
         };
       });
     },
 
-    _showTemplateEditor(idx, tpl, lang) {
-      // 移除已有的编辑器
+    _showTemplateEditor(template, options = {}) {
+      const createMode = options.create === true;
+      const editingTpl = template || {
+        id: '',
+        builtin: false,
+        name: { zh: '🆕 新模板', en: '🆕 New Template' },
+        prompt: { zh: '', en: '' }
+      };
+
       const existing = document.getElementById('saver-tpl-editor-overlay');
       if (existing) existing.remove();
 
-      const currentPrompt = tpl.prompt[lang];
       const overlay = document.createElement('div');
       overlay.id = 'saver-tpl-editor-overlay';
       overlay.className = 'saver-tpl-editor-overlay';
 
-      // 获取默认模板用于重置
-      const defaultTemplates = this._getDefaultTemplates();
-      const hasOverride = defaultTemplates[idx] && currentPrompt !== defaultTemplates[idx][lang];
+      const defaultMap = ContextPromptTemplates.getDefaultTemplateMap();
+      const defaultPrompt = editingTpl.builtin ? defaultMap[editingTpl.id] : null;
+      const hasOverride = !!(defaultPrompt && (
+        (editingTpl.prompt?.zh || '') !== (defaultPrompt.zh || '')
+        || (editingTpl.prompt?.en || '') !== (defaultPrompt.en || '')
+      ));
 
       overlay.innerHTML = `
         <div class="saver-tpl-editor-dialog">
-          <h3>✏️ 编辑「${tpl.name[lang]}」</h3>
+          <h3>${createMode ? '➕ 新增模板' : `✏️ 编辑「${editingTpl.name?.[ContextPromptTemplates._lang] || editingTpl.name?.zh || '模板'}」`}</h3>
           <div class="saver-tpl-vars">
             可用变量：<code>{title}</code> 对话标题 · <code>{msgCount}</code> 消息数 · <code>{attNote}</code> 附件说明
           </div>
-          <textarea class="saver-tpl-editor-textarea" id="saver-tpl-editor-input">${currentPrompt.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</textarea>
+          <div style="display:flex;gap:8px;margin-bottom:8px;">
+            <input id="saver-tpl-name-zh" class="saver-cardkey-input" placeholder="模板名（中文）" value="${this._escapeHtml(editingTpl.name?.zh || '')}" ${editingTpl.builtin ? 'disabled' : ''} />
+            <input id="saver-tpl-name-en" class="saver-cardkey-input" placeholder="Template Name (EN)" value="${this._escapeHtml(editingTpl.name?.en || '')}" ${editingTpl.builtin ? 'disabled' : ''} />
+          </div>
+          <div style="font-size:11px;color:var(--saver-sub-text);margin:4px 0;">中文提示词</div>
+          <textarea class="saver-tpl-editor-textarea" id="saver-tpl-editor-zh">${this._escapeHtml(editingTpl.prompt?.zh || '')}</textarea>
+          <div style="font-size:11px;color:var(--saver-sub-text);margin:8px 0 4px;">English Prompt</div>
+          <textarea class="saver-tpl-editor-textarea" id="saver-tpl-editor-en">${this._escapeHtml(editingTpl.prompt?.en || '')}</textarea>
           <div class="saver-tpl-editor-actions">
-            <button class="saver-tpl-reset" id="saver-tpl-reset-btn" ${hasOverride ? '' : 'style="display:none;"'}>↩ 恢复默认</button>
+            <button class="saver-tpl-reset" id="saver-tpl-reset-btn" ${(editingTpl.builtin && hasOverride) ? '' : 'style="display:none;"'}>↩ 恢复默认</button>
             <button class="saver-tpl-cancel" id="saver-tpl-cancel-btn">取消</button>
-            <button class="saver-tpl-save" id="saver-tpl-save-btn">💾 保存</button>
+            <button class="saver-tpl-save" id="saver-tpl-save-btn">${createMode ? '➕ 创建' : '💾 保存'}</button>
           </div>
         </div>
       `;
       document.body.appendChild(overlay);
 
-      const textarea = document.getElementById('saver-tpl-editor-input');
+      const nameZhEl = document.getElementById('saver-tpl-name-zh');
+      const nameEnEl = document.getElementById('saver-tpl-name-en');
+      const promptZhEl = document.getElementById('saver-tpl-editor-zh');
+      const promptEnEl = document.getElementById('saver-tpl-editor-en');
       const saveBtn = document.getElementById('saver-tpl-save-btn');
       const cancelBtn = document.getElementById('saver-tpl-cancel-btn');
       const resetBtn = document.getElementById('saver-tpl-reset-btn');
 
-      // 自动聚焦并把光标放到末尾
-      textarea.focus();
-      textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+      promptZhEl.focus();
+      promptZhEl.setSelectionRange(promptZhEl.value.length, promptZhEl.value.length);
 
       const close = () => overlay.remove();
 
-      saveBtn.onclick = () => {
-        const newPrompt = textarea.value;
-        if (newPrompt === currentPrompt) { close(); return; }
-        tpl.prompt[lang] = newPrompt;
-        this._saveCtxTemplateOverrides();
-        this._refreshCtxTemplateList();
-        this.showToast('✅ 模板已更新', 'success');
+      saveBtn.onclick = async () => {
+        const payload = {
+          nameZh: String(nameZhEl.value || '').trim() || '🆕 新模板',
+          nameEn: String(nameEnEl.value || '').trim() || '🆕 New Template',
+          promptZh: String(promptZhEl.value || ''),
+          promptEn: String(promptEnEl.value || '')
+        };
+        if (!payload.promptZh.trim() && !payload.promptEn.trim()) {
+          this.showToast('❌ 请至少填写一个提示词内容', 'error');
+          return;
+        }
+
+        if (createMode) {
+          await ContextPromptTemplates.createCustomTemplate(payload);
+          this.showToast('✅ 新模板已创建', 'success');
+        } else {
+          await ContextPromptTemplates.updateTemplate(editingTpl.id, payload);
+          this.showToast('✅ 模板已更新', 'success');
+        }
+
+        ContextPromptTemplates._renderSelect();
+        await this._refreshCtxTemplateList();
         close();
       };
 
       cancelBtn.onclick = close;
 
       resetBtn.onclick = () => {
-        if (defaultTemplates[idx]) {
-          textarea.value = defaultTemplates[idx][lang];
-          textarea.focus();
-        }
+        if (!defaultPrompt) return;
+        promptZhEl.value = defaultPrompt.zh || '';
+        promptEnEl.value = defaultPrompt.en || '';
       };
 
-      // 点击遮罩关闭
       overlay.addEventListener('click', (e) => {
         if (e.target === overlay) close();
       });
 
-      // ESC 关闭
       const onKey = (e) => {
-        if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); }
+        if (e.key === 'Escape') {
+          close();
+          document.removeEventListener('keydown', onKey);
+        }
       };
       document.addEventListener('keydown', onKey);
     },
 
-    _getDefaultTemplates() {
-      // 返回默认模板内容，用于"恢复默认"功能
-      return {
-        0: {
-          zh: '我已上传了一个 JSON 文件，这是之前对话「{title}」的上下文记录（共 {msgCount} 条消息）。{attNote}\n\n请你：\n1. 仔细阅读这个 JSON 文件中的对话内容\n2. 理解对话的主题、背景和我们讨论的要点\n3. 简要总结对话的核心内容（用 3-5 个要点）\n4. 然后告诉我你已准备好继续这个对话\n\n注意：请基于文件中的实际内容来理解，而不是猜测。',
-          en: 'I\'ve uploaded a JSON file containing the context of a previous conversation titled "{title}" ({msgCount} messages).{attNote}\n\nPlease:\n1. Carefully read the conversation content in the JSON file\n2. Understand the topic, background, and key discussion points\n3. Briefly summarize the core content (3-5 key points)\n4. Then let me know you\'re ready to continue this conversation\n\nNote: Please base your understanding on the actual file content, not assumptions.'
-        },
-        1: {
-          zh: '我已上传了一个 JSON 文件，这是之前对话「{title}」的上下文记录（共 {msgCount} 条消息）。{attNote}\n\n这是一个跨工作空间的项目开发对话延续。请你：\n1. 阅读 JSON 文件中的完整对话记录\n2. 识别项目的技术栈、架构和当前开发进度\n3. 梳理已完成的功能、待解决的问题和下一步计划\n4. 列出对话中提到的关键文件和代码变更\n5. 总结当前项目状态，然后告诉我你已准备好继续开发\n\n请特别注意代码片段、错误信息和技术决策的上下文。',
-          en: 'I\'ve uploaded a JSON file with the context of conversation "{title}" ({msgCount} messages).{attNote}\n\nThis is a cross-workspace project development continuation. Please:\n1. Read the complete conversation in the JSON file\n2. Identify the tech stack, architecture, and current development progress\n3. Outline completed features, pending issues, and next steps\n4. List key files and code changes mentioned in the conversation\n5. Summarize the current project status, then let me know you\'re ready to continue\n\nPay special attention to code snippets, error messages, and technical decisions.'
-        },
-        2: {
-          zh: '我已上传了一个 JSON 文件，这是之前对话「{title}」的上下文记录（共 {msgCount} 条消息）。{attNote}\n\n我们之前在排查一个问题，请你：\n1. 阅读 JSON 文件中的对话内容\n2. 识别我们正在排查的问题/Bug 是什么\n3. 梳理已经尝试过的解决方案和排查步骤\n4. 总结哪些方案有效、哪些无效\n5. 分析问题的当前状态（已解决/部分解决/未解决）\n6. 如果未解决，提出下一步排查建议\n\n请基于对话中的实际错误信息和代码来分析。',
-          en: 'I\'ve uploaded a JSON file with the context of conversation "{title}" ({msgCount} messages).{attNote}\n\nWe were debugging an issue. Please:\n1. Read the conversation content in the JSON file\n2. Identify the problem/bug we were investigating\n3. Outline solutions and debugging steps already attempted\n4. Summarize what worked and what didn\'t\n5. Analyze the current status (resolved/partially resolved/unresolved)\n6. If unresolved, suggest next debugging steps\n\nPlease base your analysis on actual error messages and code from the conversation.'
-        },
-        3: {
-          zh: '我已上传了一个 JSON 文件，这是之前对话「{title}」的上下文记录（共 {msgCount} 条消息）。{attNote}\n\n我们之前在讨论系统架构/设计方案，请你：\n1. 阅读 JSON 文件中的完整讨论\n2. 梳理讨论过的架构方案和设计决策\n3. 列出已确定的技术选型和设计模式\n4. 总结各方案的优缺点对比\n5. 明确当前的设计共识和待决定的事项\n6. 准备好继续深入讨论\n\n请保持对之前讨论中技术细节的准确理解。',
-          en: 'I\'ve uploaded a JSON file with the context of conversation "{title}" ({msgCount} messages).{attNote}\n\nWe were discussing system architecture/design. Please:\n1. Read the complete discussion in the JSON file\n2. Outline the architecture proposals and design decisions discussed\n3. List confirmed technology choices and design patterns\n4. Summarize pros and cons of each approach\n5. Clarify current design consensus and pending decisions\n6. Be ready to continue the in-depth discussion\n\nPlease maintain accurate understanding of technical details from the previous discussion.'
-        },
-        4: {
-          zh: '我已上传了对话「{title}」的上下文（{msgCount} 条消息）。{attNote}\n\n请快速阅读并用 2-3 句话总结核心内容，然后我们继续。',
-          en: 'I\'ve uploaded the context of conversation "{title}" ({msgCount} messages).{attNote}\n\nPlease quickly read and summarize the core content in 2-3 sentences, then let\'s continue.'
-        }
-      };
-    },
-
-    _saveCtxTemplateOverrides() {
-      const overrides = {};
-      ContextPromptTemplates.templates.forEach((t, i) => {
-        overrides[i] = { zh: t.prompt.zh, en: t.prompt.en };
-      });
-      try { chrome.storage.local.set({ ctxTemplateOverrides: overrides }); } catch (e) { /* ignore */ }
+    _escapeHtml(text) {
+      return String(text || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
     },
 
   };
@@ -1676,83 +2203,265 @@
 
   // ==================== 上下文延续提示词模板 ====================
   const ContextPromptTemplates = {
-    _lang: 'zh', // 'zh' or 'en'
-    _selectedIdx: 0,
+    _lang: 'zh',
+    _selectedTemplateId: 'builtin-0',
+    templates: [],
 
-    templates: [
-      {
-        name: { zh: '📋 标准延续', en: '📋 Standard Resume' },
-        prompt: {
+    getDefaultTemplateMap() {
+      return {
+        'builtin-0': {
           zh: '我已上传了一个 JSON 文件，这是之前对话「{title}」的上下文记录（共 {msgCount} 条消息）。{attNote}\n\n请你：\n1. 仔细阅读这个 JSON 文件中的对话内容\n2. 理解对话的主题、背景和我们讨论的要点\n3. 简要总结对话的核心内容（用 3-5 个要点）\n4. 然后告诉我你已准备好继续这个对话\n\n注意：请基于文件中的实际内容来理解，而不是猜测。',
           en: 'I\'ve uploaded a JSON file containing the context of a previous conversation titled "{title}" ({msgCount} messages).{attNote}\n\nPlease:\n1. Carefully read the conversation content in the JSON file\n2. Understand the topic, background, and key discussion points\n3. Briefly summarize the core content (3-5 key points)\n4. Then let me know you\'re ready to continue this conversation\n\nNote: Please base your understanding on the actual file content, not assumptions.'
-        }
-      },
-      {
-        name: { zh: '🔧 项目开发延续', en: '🔧 Dev Project Resume' },
-        prompt: {
+        },
+        'builtin-1': {
           zh: '我已上传了一个 JSON 文件，这是之前对话「{title}」的上下文记录（共 {msgCount} 条消息）。{attNote}\n\n这是一个跨工作空间的项目开发对话延续。请你：\n1. 阅读 JSON 文件中的完整对话记录\n2. 识别项目的技术栈、架构和当前开发进度\n3. 梳理已完成的功能、待解决的问题和下一步计划\n4. 列出对话中提到的关键文件和代码变更\n5. 总结当前项目状态，然后告诉我你已准备好继续开发\n\n请特别注意代码片段、错误信息和技术决策的上下文。',
           en: 'I\'ve uploaded a JSON file with the context of conversation "{title}" ({msgCount} messages).{attNote}\n\nThis is a cross-workspace project development continuation. Please:\n1. Read the complete conversation in the JSON file\n2. Identify the tech stack, architecture, and current development progress\n3. Outline completed features, pending issues, and next steps\n4. List key files and code changes mentioned in the conversation\n5. Summarize the current project status, then let me know you\'re ready to continue\n\nPay special attention to code snippets, error messages, and technical decisions.'
-        }
-      },
-      {
-        name: { zh: '🐛 问题排查延续', en: '🐛 Debug Resume' },
-        prompt: {
+        },
+        'builtin-2': {
           zh: '我已上传了一个 JSON 文件，这是之前对话「{title}」的上下文记录（共 {msgCount} 条消息）。{attNote}\n\n我们之前在排查一个问题，请你：\n1. 阅读 JSON 文件中的对话内容\n2. 识别我们正在排查的问题/Bug 是什么\n3. 梳理已经尝试过的解决方案和排查步骤\n4. 总结哪些方案有效、哪些无效\n5. 分析问题的当前状态（已解决/部分解决/未解决）\n6. 如果未解决，提出下一步排查建议\n\n请基于对话中的实际错误信息和代码来分析。',
           en: 'I\'ve uploaded a JSON file with the context of conversation "{title}" ({msgCount} messages).{attNote}\n\nWe were debugging an issue. Please:\n1. Read the conversation content in the JSON file\n2. Identify the problem/bug we were investigating\n3. Outline solutions and debugging steps already attempted\n4. Summarize what worked and what didn\'t\n5. Analyze the current status (resolved/partially resolved/unresolved)\n6. If unresolved, suggest next debugging steps\n\nPlease base your analysis on actual error messages and code from the conversation.'
-        }
-      },
-      {
-        name: { zh: '📐 架构设计延续', en: '📐 Architecture Resume' },
-        prompt: {
+        },
+        'builtin-3': {
           zh: '我已上传了一个 JSON 文件，这是之前对话「{title}」的上下文记录（共 {msgCount} 条消息）。{attNote}\n\n我们之前在讨论系统架构/设计方案，请你：\n1. 阅读 JSON 文件中的完整讨论\n2. 梳理讨论过的架构方案和设计决策\n3. 列出已确定的技术选型和设计模式\n4. 总结各方案的优缺点对比\n5. 明确当前的设计共识和待决定的事项\n6. 准备好继续深入讨论\n\n请保持对之前讨论中技术细节的准确理解。',
           en: 'I\'ve uploaded a JSON file with the context of conversation "{title}" ({msgCount} messages).{attNote}\n\nWe were discussing system architecture/design. Please:\n1. Read the complete discussion in the JSON file\n2. Outline the architecture proposals and design decisions discussed\n3. List confirmed technology choices and design patterns\n4. Summarize pros and cons of each approach\n5. Clarify current design consensus and pending decisions\n6. Be ready to continue the in-depth discussion\n\nPlease maintain accurate understanding of technical details from the previous discussion.'
-        }
-      },
-      {
-        name: { zh: '📝 快速恢复（简洁）', en: '📝 Quick Resume (Brief)' },
-        prompt: {
+        },
+        'builtin-4': {
           zh: '我已上传了对话「{title}」的上下文（{msgCount} 条消息）。{attNote}\n\n请快速阅读并用 2-3 句话总结核心内容，然后我们继续。',
           en: 'I\'ve uploaded the context of conversation "{title}" ({msgCount} messages).{attNote}\n\nPlease quickly read and summarize the core content in 2-3 sentences, then let\'s continue.'
         }
-      }
-    ],
+      };
+    },
 
-    init() {
-      this._loadPreference();
+    _buildBuiltinTemplates() {
+      const names = [
+        { zh: '📋 标准延续', en: '📋 Standard Resume' },
+        { zh: '🔧 项目开发延续', en: '🔧 Dev Project Resume' },
+        { zh: '🐛 问题排查延续', en: '🐛 Debug Resume' },
+        { zh: '📐 架构设计延续', en: '📐 Architecture Resume' },
+        { zh: '📝 快速恢复（简洁）', en: '📝 Quick Resume (Brief)' }
+      ];
+      const map = this.getDefaultTemplateMap();
+      return names.map((name, i) => ({
+        id: `builtin-${i}`,
+        builtin: true,
+        name,
+        prompt: {
+          zh: map[`builtin-${i}`].zh,
+          en: map[`builtin-${i}`].en
+        },
+        createdAt: null,
+        updatedAt: null
+      }));
+    },
+
+    async init() {
+      this.templates = this._buildBuiltinTemplates();
+      await this._loadPreference();
       this._renderSelect();
       this._bindEvents();
     },
 
-    _loadPreference() {
-      try {
-        chrome.storage.local.get(['ctxPromptLang', 'ctxPromptIdx', 'ctxTemplateOverrides'], (r) => {
-          if (r.ctxPromptLang) this._lang = r.ctxPromptLang;
-          if (typeof r.ctxPromptIdx === 'number') this._selectedIdx = r.ctxPromptIdx;
-          // 恢复用户编辑过的模板内容
-          if (r.ctxTemplateOverrides) {
-            Object.keys(r.ctxTemplateOverrides).forEach(idx => {
-              const i = parseInt(idx);
-              if (this.templates[i] && r.ctxTemplateOverrides[idx]) {
-                if (r.ctxTemplateOverrides[idx].zh) this.templates[i].prompt.zh = r.ctxTemplateOverrides[idx].zh;
-                if (r.ctxTemplateOverrides[idx].en) this.templates[i].prompt.en = r.ctxTemplateOverrides[idx].en;
-              }
-            });
-          }
-          this._renderSelect();
-          this._updateLangBtn();
+    async _storageGet(keys) {
+      return new Promise((resolve) => {
+        try {
+          chrome.storage.local.get(keys, (r) => resolve(r || {}));
+        } catch (e) {
+          resolve({});
+        }
+      });
+    },
+
+    async _storageSet(payload) {
+      return new Promise((resolve) => {
+        try {
+          chrome.storage.local.set(payload, () => resolve());
+        } catch (e) {
+          resolve();
+        }
+      });
+    },
+
+    _findTemplateById(templateId) {
+      return this.templates.find(t => t.id === templateId) || null;
+    },
+
+    getSelectedTemplate() {
+      return this._findTemplateById(this._selectedTemplateId) || this.templates[0];
+    },
+
+    getAllTemplates() {
+      return [...this.templates];
+    },
+
+    async selectTemplate(templateId) {
+      const found = this._findTemplateById(templateId);
+      if (!found) return;
+      this._selectedTemplateId = templateId;
+      await this._storageSet({
+        ctxTemplateSelectedId: templateId,
+        ctxPromptIdx: this.templates.findIndex(t => t.id === templateId)
+      });
+      this._renderSelect();
+    },
+
+    async createCustomTemplate(payload) {
+      const now = new Date().toISOString();
+      const t = {
+        id: `custom-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+        builtin: false,
+        name: {
+          zh: String(payload?.nameZh || '🆕 新模板').trim() || '🆕 新模板',
+          en: String(payload?.nameEn || '🆕 New Template').trim() || '🆕 New Template'
+        },
+        prompt: {
+          zh: String(payload?.promptZh || '').trim(),
+          en: String(payload?.promptEn || '').trim()
+        },
+        createdAt: now,
+        updatedAt: now
+      };
+      this.templates.push(t);
+      await this._saveCustomTemplates();
+      await this.selectTemplate(t.id);
+      return t;
+    },
+
+    async updateTemplate(templateId, changes = {}) {
+      const t = this._findTemplateById(templateId);
+      if (!t) return null;
+      if (changes.nameZh !== undefined) t.name.zh = String(changes.nameZh || '').trim() || t.name.zh;
+      if (changes.nameEn !== undefined) t.name.en = String(changes.nameEn || '').trim() || t.name.en;
+      if (changes.promptZh !== undefined) t.prompt.zh = String(changes.promptZh || '');
+      if (changes.promptEn !== undefined) t.prompt.en = String(changes.promptEn || '');
+      t.updatedAt = new Date().toISOString();
+      if (t.builtin) await this._saveTemplateOverridesById();
+      else await this._saveCustomTemplates();
+      return t;
+    },
+
+    async removeCustomTemplate(templateId) {
+      const idx = this.templates.findIndex(t => t.id === templateId);
+      if (idx < 0) return false;
+      if (this.templates[idx].builtin) return false;
+      this.templates.splice(idx, 1);
+      await this._saveCustomTemplates();
+      if (!this._findTemplateById(this._selectedTemplateId)) {
+        this._selectedTemplateId = 'builtin-0';
+        await this._storageSet({ ctxTemplateSelectedId: this._selectedTemplateId, ctxPromptIdx: 0 });
+      }
+      this._renderSelect();
+      return true;
+    },
+
+    async _loadPreference() {
+      const r = await this._storageGet([
+        'ctxPromptLang',
+        'ctxPromptIdx',
+        'ctxTemplateOverrides',
+        'ctxTemplatesCustom',
+        'ctxTemplateOverridesById',
+        'ctxTemplateSelectedId'
+      ]);
+
+      if (r.ctxPromptLang === 'zh' || r.ctxPromptLang === 'en') {
+        this._lang = r.ctxPromptLang;
+      }
+
+      // 迁移旧 overrides(idx -> templateId)
+      const migratedOverridesById = { ...(r.ctxTemplateOverridesById || {}) };
+      if (r.ctxTemplateOverrides && typeof r.ctxTemplateOverrides === 'object') {
+        Object.keys(r.ctxTemplateOverrides).forEach((idx) => {
+          const source = r.ctxTemplateOverrides[idx];
+          const templateId = `builtin-${Number(idx)}`;
+          if (!source || !this._findTemplateById(templateId)) return;
+          migratedOverridesById[templateId] = {
+            zh: source.zh || '',
+            en: source.en || ''
+          };
         });
-      } catch (e) { /* ignore */ }
+      }
+
+      // 应用 builtin overrides
+      Object.keys(migratedOverridesById).forEach((templateId) => {
+        const t = this._findTemplateById(templateId);
+        const source = migratedOverridesById[templateId];
+        if (!t || !source) return;
+        if (source.zh) t.prompt.zh = source.zh;
+        if (source.en) t.prompt.en = source.en;
+      });
+
+      // 加载自定义模板
+      const custom = Array.isArray(r.ctxTemplatesCustom) ? r.ctxTemplatesCustom : [];
+      custom.forEach((item) => {
+        if (!item || typeof item !== 'object') return;
+        const id = String(item.id || '');
+        if (!id || !id.startsWith('custom-')) return;
+        this.templates.push({
+          id,
+          builtin: false,
+          name: {
+            zh: String(item.name?.zh || '🆕 新模板'),
+            en: String(item.name?.en || '🆕 New Template')
+          },
+          prompt: {
+            zh: String(item.prompt?.zh || ''),
+            en: String(item.prompt?.en || '')
+          },
+          createdAt: item.createdAt || new Date().toISOString(),
+          updatedAt: item.updatedAt || new Date().toISOString()
+        });
+      });
+
+      // 迁移旧 selectedIdx -> selectedId
+      if (r.ctxTemplateSelectedId && this._findTemplateById(r.ctxTemplateSelectedId)) {
+        this._selectedTemplateId = r.ctxTemplateSelectedId;
+      } else if (typeof r.ctxPromptIdx === 'number') {
+        const fallbackId = `builtin-${Math.max(0, Math.min(4, r.ctxPromptIdx))}`;
+        this._selectedTemplateId = this._findTemplateById(fallbackId) ? fallbackId : 'builtin-0';
+      } else {
+        this._selectedTemplateId = 'builtin-0';
+      }
+
+      // 回写迁移结果
+      await this._storageSet({
+        ctxPromptLang: this._lang,
+        ctxTemplateOverridesById: migratedOverridesById,
+        ctxTemplateSelectedId: this._selectedTemplateId,
+        ctxPromptIdx: this.templates.findIndex(t => t.id === this._selectedTemplateId)
+      });
+    },
+
+    async _saveTemplateOverridesById() {
+      const payload = {};
+      this.templates.filter(t => t.builtin).forEach((t) => {
+        payload[t.id] = {
+          zh: t.prompt.zh,
+          en: t.prompt.en
+        };
+      });
+      await this._storageSet({ ctxTemplateOverridesById: payload });
+    },
+
+    async _saveCustomTemplates() {
+      const custom = this.templates.filter(t => !t.builtin).map(t => ({
+        id: t.id,
+        name: { zh: t.name.zh, en: t.name.en },
+        prompt: { zh: t.prompt.zh, en: t.prompt.en },
+        createdAt: t.createdAt,
+        updatedAt: t.updatedAt
+      }));
+      await this._storageSet({ ctxTemplatesCustom: custom });
     },
 
     _renderSelect() {
       const sel = document.getElementById('saver-ctx-prompt-select');
       if (!sel) return;
       sel.innerHTML = '';
-      this.templates.forEach((t, i) => {
+      this.templates.forEach((t) => {
         const opt = document.createElement('option');
-        opt.value = i;
+        opt.value = t.id;
         opt.textContent = t.name[this._lang];
-        if (i === this._selectedIdx) opt.selected = true;
+        if (t.id === this._selectedTemplateId) opt.selected = true;
         sel.appendChild(opt);
       });
     },
@@ -1764,21 +2473,26 @@
 
     _bindEvents() {
       const sel = document.getElementById('saver-ctx-prompt-select');
-      if (sel) {
-        sel.addEventListener('change', () => {
-          this._selectedIdx = parseInt(sel.value) || 0;
-          try { chrome.storage.local.set({ ctxPromptIdx: this._selectedIdx }); } catch (e) { /* ignore */ }
+      if (sel && !sel.dataset.bound) {
+        sel.dataset.bound = '1';
+        sel.addEventListener('change', async () => {
+          await this.selectTemplate(sel.value);
         });
       }
       const langBtn = document.getElementById('saver-ctx-lang-toggle');
-      if (langBtn) {
-        langBtn.addEventListener('click', () => {
+      if (langBtn && !langBtn.dataset.bound) {
+        langBtn.dataset.bound = '1';
+        langBtn.addEventListener('click', async () => {
           this._lang = this._lang === 'zh' ? 'en' : 'zh';
           this._updateLangBtn();
           this._renderSelect();
-          try { chrome.storage.local.set({ ctxPromptLang: this._lang }); } catch (e) { /* ignore */ }
+          await this._storageSet({ ctxPromptLang: this._lang });
+          if (window.ChatGPTSaver?.UI?._refreshCtxTemplateList) {
+            window.ChatGPTSaver.UI._refreshCtxTemplateList();
+          }
         });
       }
+      this._updateLangBtn();
     },
 
     buildPrompt(title, msgCount, ctxFiles = [], attFiles = []) {
@@ -1793,7 +2507,7 @@
         ctxArr = [];
       }
 
-      const tpl = this.templates[this._selectedIdx] || this.templates[0];
+      const tpl = this.getSelectedTemplate() || this.templates[0];
       const lang = this._lang;
 
       // 构建 JSON 文件描述
@@ -2049,10 +2763,266 @@
     }
   };
 
+  // ==================== 对话导航管理器 ====================
+  const ChatNavigator = {
+    FAVORITES_KEY: 'chatNavFavorites',
+    _favorites: {},
+    _messages: [],
+    _observer: null,
+    _refreshTimer: null,
+    _searchBound: false,
+    _conversationId: '',
+
+    async init() {
+      await this._loadFavorites();
+      this._bindSearch();
+      this._bindContainerObserver();
+      this.refresh();
+    },
+
+    _getConversationId() {
+      const match = location.pathname.match(/\/c\/([a-zA-Z0-9-]+)/);
+      if (match && match[1]) return match[1];
+      return `path:${location.pathname}`;
+    },
+
+    _getConversationTitle() {
+      try {
+        return window.ChatGPTSaver?.Parser?.getConversationTitle?.() || document.title || '未命名对话';
+      } catch (e) {
+        return document.title || '未命名对话';
+      }
+    },
+
+    async _loadFavorites() {
+      try {
+        const r = await chrome.storage.local.get([this.FAVORITES_KEY]);
+        this._favorites = r[this.FAVORITES_KEY] || {};
+      } catch (e) {
+        this._favorites = {};
+      }
+    },
+
+    async _saveFavorites() {
+      try {
+        await chrome.storage.local.set({ [this.FAVORITES_KEY]: this._favorites });
+      } catch (e) {
+        // ignore
+      }
+    },
+
+    _buildMessageId(el, idx) {
+      return el.getAttribute('data-message-id')
+        || el.id
+        || `msg-${idx}`;
+    },
+
+    _extractMessages() {
+      const messageEls = window.ChatGPTSaver.Parser.getMessageElements();
+      return messageEls.map((el, idx) => {
+        const role = el.getAttribute('data-message-author-role') || (idx % 2 === 0 ? 'user' : 'assistant');
+        const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        const snippet = text.length > 120 ? `${text.slice(0, 120)}...` : text;
+        return {
+          index: idx,
+          role,
+          messageId: this._buildMessageId(el, idx),
+          snippet: snippet || '(空消息)',
+          element: el
+        };
+      });
+    },
+
+    _getCurrentFavorites() {
+      return this._favorites[this._conversationId] || [];
+    },
+
+    _isFavorite(messageId) {
+      return this._getCurrentFavorites().some(f => f.messageId === messageId);
+    },
+
+    async _toggleFavorite(item) {
+      if (!item) return;
+      const list = this._favorites[this._conversationId] || [];
+      const idx = list.findIndex(f => f.messageId === item.messageId);
+      if (idx >= 0) {
+        list.splice(idx, 1);
+      } else {
+        list.push({
+          messageId: item.messageId,
+          role: item.role,
+          snippet: item.snippet,
+          conversationId: this._conversationId,
+          conversationTitle: this._getConversationTitle(),
+          createdAt: new Date().toISOString(),
+          indexHint: item.index
+        });
+      }
+      this._favorites[this._conversationId] = list;
+      await this._saveFavorites();
+      this.render();
+    },
+
+    _scrollToMessage(messageId, indexHint = null) {
+      let target = this._messages.find(m => m.messageId === messageId);
+      if (!target && Number.isInteger(indexHint)) {
+        target = this._messages.find(m => m.index === indexHint);
+      }
+      if (!target || !target.element) return;
+      target.element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      target.element.classList.add('saver-nav-highlight');
+      setTimeout(() => target.element?.classList?.remove('saver-nav-highlight'), 2200);
+    },
+
+    _bindSearch() {
+      if (this._searchBound) return;
+      this._searchBound = true;
+      const input = document.getElementById('saver-nav-search');
+      if (!input) return;
+      input.addEventListener('input', () => this.render());
+      input.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        const q = (input.value || '').trim().toLowerCase();
+        if (!q) return;
+        const hit = this._messages.find(m => m.snippet.toLowerCase().includes(q));
+        if (hit) this._scrollToMessage(hit.messageId, hit.index);
+      });
+    },
+
+    _bindContainerObserver() {
+      const container = window.ChatGPTSaver.Parser.getConversationContainer();
+      if (!container) return;
+      if (this._observer) this._observer.disconnect();
+      this._observer = new MutationObserver(() => {
+        if (this._refreshTimer) clearTimeout(this._refreshTimer);
+        this._refreshTimer = setTimeout(() => this.refresh(), 250);
+      });
+      this._observer.observe(container, {
+        childList: true,
+        subtree: true,
+        characterData: true
+      });
+    },
+
+    onConversationChanged() {
+      this._bindContainerObserver();
+      this.refresh();
+    },
+
+    refresh() {
+      this._conversationId = this._getConversationId();
+      this._messages = this._extractMessages();
+      this.render();
+    },
+
+    render() {
+      const listEl = document.getElementById('saver-nav-list');
+      const favEl = document.getElementById('saver-nav-favorites');
+      const statsEl = document.getElementById('saver-nav-stats');
+      const searchInput = document.getElementById('saver-nav-search');
+      if (!listEl || !favEl) return;
+
+      const q = (searchInput?.value || '').trim().toLowerCase();
+      const filtered = q
+        ? this._messages.filter(m => m.snippet.toLowerCase().includes(q))
+        : this._messages;
+
+      if (statsEl) {
+        statsEl.textContent = `当前对话 ${this._messages.length} 条消息，命中 ${filtered.length} 条`;
+      }
+
+      if (!filtered.length) {
+        listEl.innerHTML = '<div class="saver-context-status">没有匹配消息</div>';
+      } else {
+        listEl.innerHTML = filtered.map(item => {
+          const icon = item.role === 'assistant' ? '🤖' : '👤';
+          const fav = this._isFavorite(item.messageId) ? '⭐' : '☆';
+          return `
+            <div class="saver-context-item" data-nav-message-id="${item.messageId}" data-nav-index="${item.index}" style="cursor:pointer;">
+              <span class="ctx-icon">${icon}</span>
+              <div class="ctx-info">
+                <div class="ctx-title">#${item.index + 1}</div>
+                <div class="ctx-meta">${item.snippet}</div>
+              </div>
+              <button class="saver-nav-fav-btn" data-fav-id="${item.messageId}" data-fav-index="${item.index}" style="background:none;border:none;cursor:pointer;font-size:15px;line-height:1;">${fav}</button>
+            </div>
+          `;
+        }).join('');
+      }
+
+      listEl.querySelectorAll('[data-nav-message-id]').forEach(row => {
+        row.onclick = (e) => {
+          if (e.target?.closest('.saver-nav-fav-btn')) return;
+          const messageId = row.getAttribute('data-nav-message-id');
+          const indexHint = Number(row.getAttribute('data-nav-index'));
+          this._scrollToMessage(messageId, indexHint);
+        };
+      });
+
+      listEl.querySelectorAll('.saver-nav-fav-btn').forEach(btn => {
+        btn.onclick = async (e) => {
+          e.stopPropagation();
+          const messageId = btn.getAttribute('data-fav-id');
+          const indexHint = Number(btn.getAttribute('data-fav-index'));
+          const item = this._messages.find(m => m.messageId === messageId || m.index === indexHint);
+          await this._toggleFavorite(item);
+        };
+      });
+
+      const grouped = Object.entries(this._favorites || {});
+      if (!grouped.length) {
+        favEl.innerHTML = '<div class="saver-context-status">暂无收藏</div>';
+      } else {
+        favEl.innerHTML = grouped.map(([convId, items]) => {
+          if (!Array.isArray(items) || !items.length) return '';
+          const title = items[0]?.conversationTitle || convId;
+          return `
+            <div class="saver-ws-group" data-conv-id="${convId}">
+              <div class="saver-ws-header expanded">
+                <span class="saver-ws-arrow">▶</span>
+                <span>🗂️ ${title}</span>
+                <span class="saver-ws-count">${items.length}</span>
+              </div>
+              <div class="saver-ws-children">
+                ${items.map(item => `
+                  <div class="saver-context-item" data-fav-jump-id="${item.messageId}" data-fav-jump-index="${item.indexHint}" data-fav-conv-id="${item.conversationId}" style="cursor:pointer;">
+                    <span class="ctx-icon">${item.role === 'assistant' ? '🤖' : '👤'}</span>
+                    <div class="ctx-info">
+                      <div class="ctx-title">#${(item.indexHint || 0) + 1}</div>
+                      <div class="ctx-meta">${item.snippet || ''}</div>
+                    </div>
+                  </div>
+                `).join('')}
+              </div>
+            </div>
+          `;
+        }).join('');
+      }
+
+      favEl.querySelectorAll('.saver-ws-header').forEach(header => {
+        header.onclick = () => header.classList.toggle('expanded');
+      });
+      favEl.querySelectorAll('[data-fav-jump-id]').forEach(row => {
+        row.onclick = () => {
+          const convId = row.getAttribute('data-fav-conv-id');
+          const messageId = row.getAttribute('data-fav-jump-id');
+          const indexHint = Number(row.getAttribute('data-fav-jump-index'));
+          // 仅当前对话支持直接跳转，其他对话先提醒切换
+          if (convId !== this._conversationId) {
+            UI.showToast('请先切换到对应对话，再点击收藏定位', 'info', 2500);
+            return;
+          }
+          this._scrollToMessage(messageId, indexHint);
+        };
+      });
+    }
+  };
+
   // ==================== 核心逻辑 ====================
   let isInitialized = false;
   let saveDebounceTimer = null;
   let refreshPromptShown = false;
+  let accessWatchTimer = null;
 
   async function init() {
     if (isInitialized) return;
@@ -2063,16 +3033,15 @@
     // 先初始化 UI（按钮 + 面板 + toast）
     UI.init();
 
-    // 卡密验证
-    const cardValid = await CardKeyManager.init();
-    if (!cardValid) {
-      // 未激活，显示卡密输入界面，隐藏功能面板
-      console.log('[ChatGPT Saver] 卡密未激活，等待用户输入');
-      UI.showCardKeyOverlay();
+    // 统一访问控制（卡密 + 游客）
+    const accessGranted = await AccessManager.init(CardKeyManager);
+    if (!accessGranted) {
+      console.log('[ChatGPT Saver] 当前不可用，等待激活或游客登录');
+      UI.showCardKeyOverlay(AccessManager.getUnavailableMessage());
       return;
     }
 
-    // 卡密有效，继续初始化
+    // 已授权，继续初始化
     await initAfterCardKey();
   }
 
@@ -2083,6 +3052,7 @@
     await UsageMonitor.init();
     AttachmentManager.init();
     ContextPromptTemplates.init();
+    await ChatNavigator.init();
     await tryRestoreFileAccess();
     setupMessageListener();
     if (config.autoSave) startAutoSave();
@@ -2090,6 +3060,21 @@
     isInitialized = true;
     UI.updateStatus();
     UI.updateUsage();
+
+    if (accessWatchTimer) clearInterval(accessWatchTimer);
+    accessWatchTimer = setInterval(() => {
+      const usable = AccessManager.canUseNow();
+      UI.updateCardKeyBadge();
+      if (usable) return;
+      if (window.ChatGPTSaver.Observer?.isActive?.()) {
+        window.ChatGPTSaver.Observer.stop();
+      }
+      if (!AccessManager.wasExpiryNotified()) {
+        AccessManager.markExpiryNotified();
+        UI.showCardKeyOverlay(AccessManager.getUnavailableMessage());
+      }
+    }, 60 * 1000);
+
     console.log('ChatGPT 对话保存助手初始化完成');
   }
 
@@ -2121,10 +3106,11 @@
 
   async function loadSettings() {
     try {
-      const result = await chrome.storage.local.get(['autoSave', 'exportFormats', 'showLogPanel']);
+      const result = await chrome.storage.local.get(['autoSave', 'exportFormats', 'showLogPanel', 'pdfExportMode']);
       if (typeof result.autoSave !== 'undefined') config.autoSave = result.autoSave;
       if (result.exportFormats) config.formats = { ...config.formats, ...result.exportFormats };
       if (typeof result.showLogPanel !== 'undefined') config.showLogPanel = result.showLogPanel;
+      if (typeof result.pdfExportMode === 'string') config.pdfExportMode = result.pdfExportMode;
     } catch (e) { console.error('加载设置失败:', e); }
   }
 
@@ -2142,7 +3128,11 @@
           sendResponse(await window.ChatGPTSaver.FileSystem.requestFolderAccess());
           break;
         case 'exportNow':
-          sendResponse(await window.ChatGPTSaver.Exporter.exportConversation(request.formats || config.formats));
+          sendResponse(await window.ChatGPTSaver.Exporter.exportConversation(
+            request.formats || config.formats,
+            !!request.forceExport,
+            { pdfMode: request.pdfMode || config.pdfExportMode || 'structured' }
+          ));
           break;
         case 'updateFormats':
           config.formats = request.formats;
@@ -2183,26 +3173,35 @@
   }
 
   function startAutoSave() {
-    const unavailableMessage = CardKeyManager.getUnavailableMessage();
-    if (!CardKeyManager.canUseNow()) {
+    const unavailableMessage = AccessManager.getUnavailableMessage();
+    if (!AccessManager.canUseNow()) {
       UI.showCardKeyOverlay(unavailableMessage);
       UI.updateStatus();
       return;
     }
     window.ChatGPTSaver.Observer.start(async () => {
-      if (!CardKeyManager.canUseNow()) return;
+      if (!AccessManager.canUseNow()) return;
       if (saveDebounceTimer) clearTimeout(saveDebounceTimer);
       if (window.ChatGPTSaver.FileSystem.isAuthorized()) {
         UI.showLog();
         UI.addLog('⏳ 检测到对话变化，等待稳定后保存...');
       }
       saveDebounceTimer = setTimeout(async () => {
+        if (!AccessManager.canUseNow()) {
+          UI.showCardKeyOverlay(AccessManager.getUnavailableMessage());
+          UI.updateStatus();
+          return;
+        }
         if (!window.ChatGPTSaver.FileSystem.isAuthorized() || !window.ChatGPTSaver.Exporter.canExport()) {
           UI.clearLog();
           return;
         }
         try {
-          const result = await window.ChatGPTSaver.Exporter.exportConversation(config.formats);
+          const result = await window.ChatGPTSaver.Exporter.exportConversation(
+            config.formats,
+            false,
+            { pdfMode: config.pdfExportMode || 'structured' }
+          );
           if (result.success) {
             if (result.skipped) {
               UI.showToast('😊 无需更新对话哦', 'success', 3000);
@@ -2228,6 +3227,7 @@
       if (window.ChatGPTSaver.FileSystem.isAuthorized()) UI.addLog('✅ 页面加载完成');
       if (config.autoSave) startAutoSave();
       UI.updateUsage();
+      ChatNavigator.onConversationChanged();
     }, 1500);
   }
 

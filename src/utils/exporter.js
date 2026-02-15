@@ -17,8 +17,10 @@ const Exporter = {
    * 导出当前对话
    * @param {Object} formats - 导出格式配置
    * @param {boolean} forceExport - 是否强制导出（跳过更新检查）
+   * @param {Object} options - 其他参数
+   * @param {'structured'|'visual'} options.pdfMode - PDF 导出模式
    */
-  async exportConversation(formats = { html: true, md: true, pdf: true }, forceExport = false) {
+  async exportConversation(formats = { html: true, md: true, pdf: true }, forceExport = false, options = {}) {
     const parser = window.ChatGPTSaver.Parser;
     const fileSystem = window.ChatGPTSaver.FileSystem;
     const logger = window.ChatGPTSaver?.Logger;
@@ -109,6 +111,8 @@ const Exporter = {
           const reason = window.ChatGPTSaver.PDFExporter.getUnavailableReason();
           this.log(`⚠️ PDF 导出不可用: ${reason}`);
         } else {
+          const pdfMode = options.pdfMode === 'visual' ? 'visual' : 'structured';
+          this.log(`🧭 PDF 模式: ${pdfMode === 'structured' ? '结构化' : '视觉还原'}`);
           // 使用带重试的导出，更稳定；传递进度回调
           const onProgress = (current, total) => {
             this.log(`📦 正在导出 ${current}/${total} 条消息...`);
@@ -117,7 +121,7 @@ const Exporter = {
               window.ChatGPTSaver.UI.showToast(`📦 正在导出 ${current}/${total} 条消息 (${pct}%)`, 'saving', 0);
             }
           };
-          pdfBlob = await window.ChatGPTSaver.PDFExporter.exportWithFallback(onProgress);
+          pdfBlob = await window.ChatGPTSaver.PDFExporter.exportWithFallback({ mode: pdfMode, onProgress });
           if (pdfBlob) {
             const sizeKB = Math.round(pdfBlob.size / 1024);
             this.log(`✅ PDF 完成, 大小: ${sizeKB} KB`);
@@ -188,7 +192,7 @@ const Exporter = {
     }
     
     if (formats.pdf) {
-      result.pdf = await window.ChatGPTSaver.PDFExporter.export();
+      result.pdf = await window.ChatGPTSaver.PDFExporter.exportWithFallback({ mode: 'structured' });
     }
     
     return result;

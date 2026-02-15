@@ -318,7 +318,8 @@ const PDFExporter = {
     pdf.text('ChatGPT Saver', margin, y);
     
     // 右侧页码
-    pdf.text(`${currentPage} / ${totalPages}`, pageWidth - margin - 15, y);
+    const pageText = Number(totalPages) > 0 ? `${currentPage} / ${totalPages}` : `${currentPage}`;
+    pdf.text(pageText, pageWidth - margin - 15, y);
   },
   
   /**
@@ -678,25 +679,328 @@ const PDFExporter = {
     }
   },
 
-  /**
-   * 带自动降级的导出：优先使用流式渲染，短对话回退到整体渲染
-   */
-  async exportWithFallback(onProgress) {
+  _createStructuredContext(title) {
+    const { jsPDF } = jspdf;
+    const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+    const ctx = {
+      pdf,
+      title,
+      pageWidth: 210,
+      pageHeight: 297,
+      margin: 15,
+      headerHeight: 12,
+      footerHeight: 12,
+      lineHeight: 4.2,
+      pageNum: 1
+    };
+    ctx.contentWidth = ctx.pageWidth - ctx.margin * 2;
+    ctx.topY = ctx.margin + ctx.headerHeight + 2;
+    ctx.bottomY = ctx.pageHeight - ctx.margin - ctx.footerHeight;
+    ctx.cursorY = ctx.topY;
+    this.addHeader(pdf, title, 1, ctx.pageWidth, ctx.margin);
+    return ctx;
+  },
+
+  _structuredNewPage(ctx) {
+    this.addFooter(ctx.pdf, ctx.pageNum, 0, ctx.pageWidth, ctx.pageHeight, ctx.margin);
+    ctx.pdf.addPage();
+    ctx.pageNum += 1;
+    this.addHeader(ctx.pdf, ctx.title, ctx.pageNum, ctx.pageWidth, ctx.margin);
+    ctx.cursorY = ctx.topY;
+  },
+
+  _structuredEnsureSpace(ctx, neededHeight) {
+    if (ctx.cursorY + neededHeight <= ctx.bottomY) return;
+    this._structuredNewPage(ctx);
+  },
+
+  _extractFormulaText(node) {
+    if (!node) return '';
+    const direct = [
+      node.getAttribute?.('data-tex'),
+      node.getAttribute?.('data-latex'),
+      node.getAttribute?.('aria-label')
+    ].find(Boolean);
+    if (direct) return String(direct).trim();
+
+    const texAnnotation = node.querySelector?.('annotation[encoding="application/x-tex"]')?.textContent?.trim();
+    if (texAnnotation) return texAnnotation;
+
+    const mathScript = node.querySelector?.('script[type="math/tex"]')?.textContent?.trim();
+    if (mathScript) return mathScript;
+
+    const assistiveMath = node.querySelector?.('mjx-assistive-mml')?.textContent?.trim();
+    if (assistiveMath) return assistiveMath;
+
+    return '';
+  },
+
+  _isMathNode(node) {
+    if (!node || node.nodeType !== 1) return false;
+    const cls = String(node.className || '').toLowerCase();
+    const tag = String(node.tagName || '').toLowerCase();
+    return cls.includes('katex') || cls.includes('mathjax') || cls.includes('math') || tag === 'math' || tag === 'mjx-container';
+  },
+
+  _extractInlineText(node) {
+    if (!node) return '';
+    if (node.nodeType === Node.TEXT_NODE) return node.textContent || '';
+    if (node.nodeType !== Node.ELEMENT_NODE) return '';
+
+    const tag = String(node.tagName || '').toLowerCase();
+    if (tag === 'br') return '\n';
+    if (this._isMathNode(node)) {
+      const formula = this._extractFormulaText(node);
+      return formula ? `$${formula}$` : '[公式]';
+    }
+    if (tag === 'code') return `\`${node.textContent || ''}\``;
+
+    return Array.from(node.childNodes).map(child => this._extractInlineText(child)).join('');
+  },
+
+  _writeParagraph(ctx, text, options = {}) {
+    const content = String(text || '').replace(/\r/g, '').trim();
+    if (!content) return;
+
+    const fontSize = Number(options.fontSize || 11);
+    const indent = Number(options.indent || 0);
+    const color = options.color || [55, 65, 81];
+    const spacingAfter = Number(options.spacingAfter || 2);
+    const lineHeight = Number(options.lineHeight || 4.3);
+    const font = options.font || 'helvetica';
+    const style = options.style || 'normal';
+
+    ctx.pdf.setFont(font, style);
+    ctx.pdf.setFontSize(fontSize);
+    ctx.pdf.setTextColor(color[0], color[1], color[2]);
+
+    const maxWidth = Math.max(20, ctx.contentWidth - indent);
+    const lines = ctx.pdf.splitTextToSize(content, maxWidth);
+    lines.forEach((line) => {
+      if (ctx.cursorY + lineHeight > ctx.bottomY) this._structuredNewPage(ctx);
+      ctx.pdf.text(line, ctx.margin + indent, ctx.cursorY);
+      ctx.cursorY += lineHeight;
+    });
+    ctx.cursorY += spacingAfter;
+  },
+
+  _writeCodeBlock(ctx, text) {
+    const codeText = String(text || '').replace(/\r/g, '').trim();
+    if (!codeText) return;
+    const lines = codeText.split('\n');
+    ctx.pdf.setFont('courier', 'normal');
+    ctx.pdf.setFontSize(9.5);
+    ctx.pdf.setTextColor(31, 41, 55);
+    const wrapped = lines.flatMap(line => ctx.pdf.splitTextToSize(line, ctx.contentWidth - 6));
+    const lineHeight = 3.8;
+    const minBlockHeight = lineHeight + 6;
+
+    let i = 0;
+    while (i < wrapped.length) {
+      const freeHeight = Math.max(minBlockHeight, ctx.bottomY - ctx.cursorY);
+      const linesPerPage = Math.max(1, Math.floor((freeHeight - 6) / lineHeight));
+      const chunk = wrapped.slice(i, i + linesPerPage);
+      const blockHeight = chunk.length * lineHeight + 6;
+      this._structuredEnsureSpace(ctx, blockHeight);
+
+      ctx.pdf.setFillColor(243, 244, 246);
+      ctx.pdf.rect(ctx.margin, ctx.cursorY, ctx.contentWidth, blockHeight, 'F');
+      ctx.pdf.setDrawColor(229, 231, 235);
+      ctx.pdf.rect(ctx.margin, ctx.cursorY, ctx.contentWidth, blockHeight);
+      chunk.forEach((line, idx) => {
+        ctx.pdf.text(line, ctx.margin + 2, ctx.cursorY + 4 + idx * lineHeight);
+      });
+      ctx.cursorY += blockHeight + 2;
+      i += chunk.length;
+      if (i < wrapped.length) this._structuredNewPage(ctx);
+    }
+  },
+
+  _writeTable(ctx, tableEl) {
+    const rows = Array.from(tableEl.querySelectorAll('tr')).map(tr =>
+      Array.from(tr.querySelectorAll('th,td')).map(td => (td.textContent || '').replace(/\s+/g, ' ').trim())
+    ).filter(r => r.length > 0);
+    if (!rows.length) return;
+
+    this._writeParagraph(ctx, '表格：', { fontSize: 10, color: [75, 85, 99], spacingAfter: 1 });
+    rows.forEach((row, idx) => {
+      const prefix = idx === 1 && rows[0].every(Boolean) ? '|---|' : '|';
+      const line = idx === 1 && rows[0].every(Boolean)
+        ? row.map(() => '---').join('|')
+        : row.map(cell => cell || ' ').join('|');
+      this._writeCodeBlock(ctx, `${prefix}${line}|`);
+    });
+    ctx.cursorY += 1;
+  },
+
+  async _writeImageBlock(ctx, node) {
+    try {
+      const host = document.createElement('div');
+      host.style.cssText = 'position:absolute;left:-9999px;top:0;background:#fff;padding:8px;max-width:700px;';
+      const clone = node.cloneNode(true);
+      host.appendChild(clone);
+      document.body.appendChild(host);
+      await new Promise(resolve => setTimeout(resolve, 30));
+      const canvas = await html2canvas(host, {
+        scale: 2,
+        useCORS: true,
+        logging: false,
+        backgroundColor: '#ffffff'
+      });
+      document.body.removeChild(host);
+
+      const imgWidth = ctx.contentWidth;
+      let imgHeight = (canvas.height * imgWidth) / canvas.width;
+      const maxHeight = Math.max(20, ctx.bottomY - ctx.topY - 2);
+      if (imgHeight > maxHeight) imgHeight = maxHeight;
+      this._structuredEnsureSpace(ctx, imgHeight + 2);
+      ctx.pdf.addImage(canvas.toDataURL('image/png'), 'PNG', ctx.margin, ctx.cursorY, imgWidth, imgHeight);
+      ctx.cursorY += imgHeight + 2;
+    } catch (e) {
+      this._writeParagraph(ctx, '[图像块导出失败]', { fontSize: 10, color: [153, 27, 27] });
+    }
+  },
+
+  async _renderStructuredNode(ctx, node) {
+    if (!node) return;
+    if (node.nodeType === Node.TEXT_NODE) {
+      this._writeParagraph(ctx, node.textContent || '', { fontSize: 11 });
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+    const tag = String(node.tagName || '').toLowerCase();
+    if (tag === 'pre') {
+      const code = node.innerText || node.textContent || '';
+      this._writeCodeBlock(ctx, code);
+      return;
+    }
+    if (tag === 'table') {
+      this._writeTable(ctx, node);
+      return;
+    }
+    if (tag === 'canvas' || tag === 'img' || tag === 'svg' || node.querySelector('canvas, img, svg')) {
+      await this._writeImageBlock(ctx, node);
+      return;
+    }
+    if (this._isMathNode(node) || tag === 'math') {
+      const formula = this._extractFormulaText(node);
+      if (formula) this._writeCodeBlock(ctx, `公式: ${formula}`);
+      else await this._writeImageBlock(ctx, node);
+      return;
+    }
+    if (['h1', 'h2', 'h3', 'h4', 'h5', 'h6'].includes(tag)) {
+      const sizes = { h1: 16, h2: 15, h3: 14, h4: 13, h5: 12, h6: 11 };
+      this._writeParagraph(ctx, this._extractInlineText(node), {
+        fontSize: sizes[tag],
+        style: 'bold',
+        spacingAfter: 2.5,
+        color: [17, 24, 39]
+      });
+      return;
+    }
+    if (tag === 'blockquote') {
+      const quoteText = this._extractInlineText(node).split('\n').map(line => line.trim()).filter(Boolean).map(line => `> ${line}`).join('\n');
+      this._writeParagraph(ctx, quoteText, { fontSize: 10.5, indent: 3, color: [75, 85, 99] });
+      return;
+    }
+    if (tag === 'ul' || tag === 'ol') {
+      const items = Array.from(node.children).filter(el => String(el.tagName || '').toLowerCase() === 'li');
+      items.forEach((li, idx) => {
+        const bullet = tag === 'ol' ? `${idx + 1}. ` : '• ';
+        this._writeParagraph(ctx, `${bullet}${this._extractInlineText(li)}`, { fontSize: 11, indent: 2, spacingAfter: 1.5 });
+      });
+      ctx.cursorY += 1;
+      return;
+    }
+
+    const blockTags = new Set(['p', 'div', 'section', 'article', 'li']);
+    if (blockTags.has(tag)) {
+      if (node.querySelector('pre, table, canvas, img, svg, math, .katex, .mathjax, mjx-container')) {
+        const children = Array.from(node.childNodes);
+        for (const child of children) {
+          await this._renderStructuredNode(ctx, child);
+        }
+        return;
+      }
+      const text = this._extractInlineText(node);
+      this._writeParagraph(ctx, text, { fontSize: 11 });
+      return;
+    }
+
+    const fallback = this._extractInlineText(node);
+    this._writeParagraph(ctx, fallback, { fontSize: 11 });
+  },
+
+  async exportStructured(options = {}) {
     if (!this.isAvailable()) return null;
+    const conversation = window.ChatGPTSaver.Parser.parseConversation();
+    if (!conversation.messages.length) return null;
+
+    const onProgress = typeof options.onProgress === 'function' ? options.onProgress : () => {};
+
+    try {
+      const ctx = this._createStructuredContext(conversation.title || 'ChatGPT');
+      this._writeParagraph(ctx, `导出时间: ${new Date().toLocaleString('zh-CN')} | 共 ${conversation.messages.length} 条消息`, {
+        fontSize: 9.5,
+        color: [107, 114, 128],
+        spacingAfter: 3
+      });
+
+      for (let i = 0; i < conversation.messages.length; i++) {
+        const msg = conversation.messages[i];
+        const role = msg.role === 'user' ? '用户' : 'ChatGPT';
+        const roleColor = msg.role === 'user' ? [16, 163, 127] : [79, 70, 229];
+        this._writeParagraph(ctx, `${i + 1}. ${role}`, {
+          fontSize: 11.5,
+          style: 'bold',
+          color: roleColor,
+          spacingAfter: 1.5
+        });
+
+        const root = document.createElement('div');
+        root.innerHTML = msg.content || '';
+        const nodes = Array.from(root.childNodes);
+        if (!nodes.length) {
+          this._writeParagraph(ctx, msg.textContent || '', { fontSize: 11 });
+        } else {
+          for (const node of nodes) {
+            await this._renderStructuredNode(ctx, node);
+          }
+        }
+
+        this._structuredEnsureSpace(ctx, 3);
+        ctx.pdf.setDrawColor(229, 231, 235);
+        ctx.pdf.line(ctx.margin, ctx.cursorY, ctx.margin + ctx.contentWidth, ctx.cursorY);
+        ctx.cursorY += 3;
+        onProgress(i + 1, conversation.messages.length);
+      }
+
+      this.addFooter(ctx.pdf, ctx.pageNum, ctx.pageNum, ctx.pageWidth, ctx.pageHeight, ctx.margin);
+      return ctx.pdf.output('blob');
+    } catch (error) {
+      console.error('[PDF] structured 导出失败:', error);
+      return null;
+    }
+  },
+
+  /**
+   * 视觉还原模式（原有截图路径）
+   */
+  async exportVisual(options = {}) {
+    if (!this.isAvailable()) return null;
+    const onProgress = typeof options.onProgress === 'function' ? options.onProgress : () => {};
 
     const conversation = window.ChatGPTSaver.Parser.parseConversation();
     if (!conversation.messages.length) return null;
 
-    // 超过 15 条消息使用流式渲染，避免卡顿
     if (conversation.messages.length > 15) {
-      console.log(`[PDF] ${conversation.messages.length} 条消息，使用流式渲染`);
       try {
         const result = await this.exportStreamed({ onProgress });
         if (result) return result;
       } catch (e) {
         console.warn('[PDF] 流式渲染失败，回退到分段模式:', e.message);
       }
-      // 流式失败，回退到分段
       try {
         return await this.exportSegmented();
       } catch (e) {
@@ -705,7 +1009,6 @@ const PDFExporter = {
       }
     }
 
-    // 短对话使用整体 canvas 模式
     try {
       const { jsPDF } = jspdf;
       const pageWidth = 210, pageHeight = 297, margin = 15;
@@ -760,6 +1063,29 @@ const PDFExporter = {
         return null;
       }
     }
+  },
+
+  /**
+   * 带自动降级的导出
+   * 兼容旧签名: exportWithFallback(onProgress)
+   * 新签名: exportWithFallback({ mode, onProgress })
+   */
+  async exportWithFallback(optionsOrProgress) {
+    let options = {};
+    if (typeof optionsOrProgress === 'function') {
+      options = { onProgress: optionsOrProgress };
+    } else if (optionsOrProgress && typeof optionsOrProgress === 'object') {
+      options = optionsOrProgress;
+    }
+
+    const mode = options.mode === 'visual' ? 'visual' : 'structured';
+    if (mode === 'visual') {
+      return this.exportVisual(options);
+    }
+
+    const structured = await this.exportStructured(options);
+    if (structured) return structured;
+    return this.exportVisual(options);
   }
 };
 

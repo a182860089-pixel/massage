@@ -54,6 +54,7 @@
         "src/utils/selectionManager.js",
         "src/utils/searchIndex.js",
         "src/utils/templateManager.js",
+        "src/utils/accessManager.js",
         "src/utils/exporter.js",
         "src/content/parser.js",
         "src/content/observer.js",

@@ -63,6 +63,18 @@ async function handleMessage(request, sender, sendResponse) {
       case 'verifyCardKey':
         await handleVerifyCardKey(request, sendResponse);
         break;
+
+      case 'pluginActivateCardKey':
+        await handlePluginCardKeyRequest('/api/plugin/card-keys/activate', request, sendResponse);
+        break;
+
+      case 'pluginCheckCardKeyStatus':
+        await handlePluginCardKeyRequest('/api/plugin/card-keys/status', request, sendResponse);
+        break;
+
+      case 'pluginRebindCardKey':
+        await handlePluginCardKeyRequest('/api/plugin/card-keys/rebind', request, sendResponse);
+        break;
         
       default:
         sendResponse({ error: '未知操作' });
@@ -115,5 +127,31 @@ async function handleVerifyCardKey(request, sendResponse) {
     sendResponse(json);
   } catch (e) {
     sendResponse({ success: false, message: '网络错误: ' + e.message, data: { valid: false } });
+  }
+}
+
+/**
+ * 插件卡密接口转发
+ */
+async function handlePluginCardKeyRequest(path, request, sendResponse) {
+  try {
+    const baseUrl = 'https://seat.20050225.xyz';
+    const resp = await fetch(baseUrl + path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        card_key: request.card_key,
+        email: request.email,
+        client_id: request.client_id
+      })
+    });
+    const json = await resp.json();
+    sendResponse(json);
+  } catch (e) {
+    sendResponse({
+      success: false,
+      message: '网络错误: ' + e.message,
+      data: { authorized: false }
+    });
   }
 }

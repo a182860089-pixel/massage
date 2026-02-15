@@ -28,86 +28,279 @@
     showLogPanel: true,
     debounceDelay: 2000,
     currentVersion: '3.1',
-    cardKeyAPI: 'https://seat.20050225.xyz/api/card-keys/verify'
+    cardKeyApiBase: 'https://seat.20050225.xyz'
   };
 
   // ==================== 卡密验证模块 ====================
   const CardKeyManager = {
     verified: false,
     cardData: null,
-    recheckInterval: 6 * 60 * 60 * 1000, // 每6小时重新校验一次
+    clientId: null,
+    clientIdStorageKey: 'pluginClientId',
+    defaultRecheckInterval: 6 * 60 * 60 * 1000, // 默认每6小时重新校验一次
+    daypassRecheckInterval: 10 * 60 * 1000, // 日抛卡10分钟复检
+    recheckInterval: 6 * 60 * 60 * 1000,
+    recheckTimer: null,
 
     async init() {
-      const r = await chrome.storage.local.get(['cardKeyData']);
-      if (r.cardKeyData && r.cardKeyData.card_key) {
-        // 有缓存的卡密，检查是否需要重新校验
-        const lastCheck = r.cardKeyData.lastCheckTime || 0;
-        const now = Date.now();
-        if (now - lastCheck < this.recheckInterval && r.cardKeyData.valid) {
-          // 缓存有效，检查剩余天数
-          if (r.cardKeyData.remaining_days > 0) {
-            this.verified = true;
-            this.cardData = r.cardKeyData;
-            return true;
-          }
+      const r = await chrome.storage.local.get(['cardKeyData', this.clientIdStorageKey]);
+      await this.ensureClientId(r[this.clientIdStorageKey]);
+
+      if (r.cardKeyData && r.cardKeyData.card_key && r.cardKeyData.email) {
+        const cachedData = this.normalizeCardData(
+          r.cardKeyData,
+          r.cardKeyData.card_key,
+          r.cardKeyData.email,
+          r.cardKeyData.client_id || this.clientId
+        );
+        if (this.isCardUsable(cachedData)) {
+          this.verified = true;
+          this.cardData = cachedData;
+          await this.persistCardData(cachedData);
+          this.startStatusRecheck();
+          return true;
         }
-        // 需要重新校验
-        const result = await this.verify(r.cardKeyData.card_key);
-        return result.valid;
+        await this.clearCardData();
       }
       return false;
     },
 
-    async verify(cardKey) {
+    async activate(cardKey, email) {
+      return this.requestAndApplyCardData({
+        action: 'pluginActivateCardKey',
+        cardKey,
+        email,
+        clearOnInvalid: false
+      });
+    },
+
+    async verify(cardKey, email) {
+      return this.activate(cardKey, email);
+    },
+
+    async checkStatus(cardKey, email, { clearOnInvalid = true } = {}) {
+      return this.requestAndApplyCardData({
+        action: 'pluginCheckCardKeyStatus',
+        cardKey,
+        email,
+        clearOnInvalid
+      });
+    },
+
+    async rebind(cardKey, email) {
+      return this.requestAndApplyCardData({
+        action: 'pluginRebindCardKey',
+        cardKey,
+        email,
+        clearOnInvalid: false
+      });
+    },
+
+    async requestAndApplyCardData({ action, cardKey, email, clearOnInvalid = false }) {
+      const normalizedCardKey = String(cardKey || '').trim();
+      const normalizedEmail = String(email || '').trim();
+      if (!normalizedCardKey || !normalizedEmail) {
+        return { valid: false, message: '请填写卡密和邮箱' };
+      }
+
       try {
-        const json = await new Promise((resolve) => {
-          chrome.runtime.sendMessage(
-            { action: 'verifyCardKey', apiUrl: config.cardKeyAPI, cardKey },
-            (resp) => resolve(resp)
-          );
+        const clientId = await this.ensureClientId();
+        const json = await this.sendRuntimeMessage(action, {
+          card_key: normalizedCardKey,
+          email: normalizedEmail,
+          client_id: clientId
         });
-        if (json.success && json.data?.valid) {
+
+        const normalized = this.normalizeCardData(json?.data, normalizedCardKey, normalizedEmail, clientId);
+        if (json?.success && this.isCardUsable(normalized)) {
           this.verified = true;
-          this.cardData = {
-            ...json.data,
-            card_key: cardKey,
-            lastCheckTime: Date.now()
-          };
-          await chrome.storage.local.set({ cardKeyData: this.cardData });
-          return { valid: true, data: json.data };
+          this.cardData = normalized;
+          await this.persistCardData(normalized);
+          this.startStatusRecheck();
+          return { valid: true, data: normalized, message: json?.message || '' };
         }
-        this.verified = false;
-        this.cardData = null;
-        await chrome.storage.local.remove(['cardKeyData']);
-        return { valid: false, message: json.message || '卡密无效' };
+
+        if (clearOnInvalid) {
+          await this.clearCardData();
+          if (typeof UI !== 'undefined' && UI.updateCardKeyBadge) {
+            UI.updateCardKeyBadge();
+          }
+        }
+        return { valid: false, message: json?.message || '卡密校验失败' };
       } catch (e) {
-        // 网络错误时，如果有缓存且未过期就放行
-        const r = await chrome.storage.local.get(['cardKeyData']);
-        if (r.cardKeyData?.valid && r.cardKeyData?.remaining_days > 0) {
-          this.verified = true;
-          this.cardData = r.cardKeyData;
-          return { valid: true, data: r.cardKeyData };
-        }
         return { valid: false, message: '网络错误，无法验证卡密' };
       }
     },
 
+    sendRuntimeMessage(action, payload) {
+      return new Promise((resolve) => {
+        chrome.runtime.sendMessage({ action, ...payload }, (resp) => {
+          resolve(resp || { success: false, message: '空响应', data: { authorized: false } });
+        });
+      });
+    },
+
+    async ensureClientId(existingClientId) {
+      if (this.clientId) return this.clientId;
+
+      const candidate = String(existingClientId || '').trim();
+      if (candidate) {
+        this.clientId = candidate;
+        return this.clientId;
+      }
+
+      const r = await chrome.storage.local.get([this.clientIdStorageKey]);
+      const stored = String(r[this.clientIdStorageKey] || '').trim();
+      if (stored) {
+        this.clientId = stored;
+        return this.clientId;
+      }
+
+      this.clientId = this.generateClientId();
+      await chrome.storage.local.set({ [this.clientIdStorageKey]: this.clientId });
+      return this.clientId;
+    },
+
+    generateClientId() {
+      if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+        return crypto.randomUUID();
+      }
+      return `cid_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    },
+
+    normalizeCardData(data, cardKey, email, clientId) {
+      const source = data || {};
+      return {
+        card_key: String(cardKey || '').trim(),
+        email: String(email || '').trim(),
+        client_id: String(clientId || source.client_id || '').trim(),
+        expires_at: source.expires_at ?? null,
+        remaining_days: this.normalizeNumber(source.remaining_days),
+        card_type: String(source.card_type || '').toLowerCase(),
+        authorized: source.authorized === true,
+        status: String(source.status || ''),
+        lastCheckTime: Date.now()
+      };
+    },
+
+    async persistCardData(cardData) {
+      await chrome.storage.local.set({ cardKeyData: cardData });
+    },
+
+    getCurrentRecheckInterval() {
+      return this.isDaypass() ? this.daypassRecheckInterval : this.defaultRecheckInterval;
+    },
+
+    startStatusRecheck() {
+      if (this.recheckTimer) {
+        clearInterval(this.recheckTimer);
+      }
+      if (!this.cardData?.card_key || !this.cardData?.email) return;
+      this.recheckInterval = this.getCurrentRecheckInterval();
+      const currentInterval = this.recheckInterval;
+
+      this.recheckTimer = setInterval(async () => {
+        if (!this.cardData?.card_key || !this.cardData?.email) return;
+        const previousCardData = this.cardData ? { ...this.cardData } : null;
+        const result = await this.checkStatus(this.cardData.card_key, this.cardData.email, { clearOnInvalid: true });
+        if (!result.valid) {
+          if (!this.verified && typeof UI !== 'undefined' && UI.showCardKeyOverlay) {
+            UI.showCardKeyOverlay(this.getUnavailableMessage(previousCardData, result.message || '卡密状态已失效，请重新激活'));
+          }
+          return;
+        }
+        if (result.valid && typeof UI !== 'undefined' && UI.updateCardKeyBadge) {
+          UI.updateCardKeyBadge();
+        }
+      }, currentInterval);
+    },
+
+    stopStatusRecheck() {
+      if (this.recheckTimer) {
+        clearInterval(this.recheckTimer);
+        this.recheckTimer = null;
+      }
+    },
+
     async logout() {
+      await this.clearCardData();
+    },
+
+    async clearCardData() {
       this.verified = false;
       this.cardData = null;
+      this.recheckInterval = this.defaultRecheckInterval;
+      this.stopStatusRecheck();
       await chrome.storage.local.remove(['cardKeyData']);
     },
 
+    normalizeNumber(value) {
+      if (value === null || typeof value === 'undefined' || value === '') return null;
+      const n = Number(value);
+      return Number.isFinite(n) ? n : null;
+    },
+
+    getExpiryTimestamp(data = this.cardData) {
+      if (!data) return null;
+      const expiry = data.expires_at ?? data.expire_at ?? data.expiry_at ?? data.expiry_date;
+      if (!expiry) return null;
+      const ts = Date.parse(expiry);
+      return Number.isFinite(ts) ? ts : null;
+    },
+
+    isCardUsable(cardData) {
+      if (!cardData) return false;
+      if (this.isUnlimited(cardData)) {
+        return cardData.authorized !== false;
+      }
+
+      if (cardData.authorized !== true) return false;
+
+      const expiryTs = this.getExpiryTimestamp(cardData);
+      if (expiryTs === null) return false;
+      return expiryTs > Date.now();
+    },
+
     getRemainingDays() {
-      return this.cardData?.remaining_days ?? 0;
+      return this.normalizeNumber(this.cardData?.remaining_days);
     },
 
     getCardType() {
       return this.cardData?.card_type || '';
     },
 
-    isUnlimited() {
-      return this.cardData?.card_type === 'unlimited';
+    isUnlimited(cardData = this.cardData) {
+      return String(cardData?.card_type || '').toLowerCase() === 'unlimited';
+    },
+
+    isDaypass(cardData = this.cardData) {
+      return String(cardData?.card_type || '').toLowerCase() === 'daypass';
+    },
+
+    getUnavailableMessage(cardData = this.cardData, fallback = '请先激活卡密后使用') {
+      if (!cardData) return fallback;
+      if (this.isUnlimited(cardData)) return fallback;
+
+      const expiryTs = this.getExpiryTimestamp(cardData);
+      if (expiryTs === null || expiryTs <= Date.now()) {
+        return this.isDaypass(cardData) ? '日抛卡已到期，请重新激活' : '卡密已到期，请重新激活';
+      }
+      return fallback;
+    },
+
+    canUseNow({ autoClear = true } = {}) {
+      if (!this.verified || !this.cardData) return false;
+
+      if (this.isUnlimited()) {
+        const usable = this.cardData.authorized !== false;
+        if (!usable && autoClear) this.clearCardData();
+        return usable;
+      }
+
+      const expiryTs = this.getExpiryTimestamp();
+      const usable = this.cardData.authorized === true && expiryTs !== null && expiryTs > Date.now();
+      if (!usable && autoClear) this.clearCardData();
+      return usable;
     }
   };
 
@@ -374,12 +567,15 @@
         .saver-cardkey-dialog { background: var(--saver-bg, #fff); border-radius: 16px; padding: 32px 24px; width: 340px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; text-align: center; color: var(--saver-text, #333); }
         .saver-cardkey-dialog h3 { margin: 0 0 8px; font-size: 18px; }
         .saver-cardkey-dialog p { margin: 0 0 20px; font-size: 13px; color: var(--saver-sub-text, #666); }
-        .saver-cardkey-input { width: 100%; padding: 12px; border: 2px solid var(--saver-border, #e5e7eb); border-radius: 8px; font-size: 14px; text-align: center; letter-spacing: 1px; outline: none; transition: border-color 0.2s; background: var(--saver-format-bg, #fff); color: var(--saver-text, #333); box-sizing: border-box; }
+        .saver-cardkey-input { width: 100%; padding: 12px; border: 2px solid var(--saver-border, #e5e7eb); border-radius: 8px; font-size: 14px; text-align: center; letter-spacing: 0.2px; outline: none; transition: border-color 0.2s; background: var(--saver-format-bg, #fff); color: var(--saver-text, #333); box-sizing: border-box; }
         .saver-cardkey-input:focus { border-color: #10a37f; }
         .saver-cardkey-input.error { border-color: #ef4444; }
         .saver-cardkey-btn { width: 100%; padding: 12px; border: none; border-radius: 8px; background: #10a37f; color: white; font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 12px; transition: opacity 0.2s; }
+        .saver-cardkey-btn.secondary { background: var(--saver-sec-btn-bg, #f3f4f6); color: var(--saver-sec-btn-text, #374151); border: 1px solid var(--saver-border, #e5e7eb); }
         .saver-cardkey-btn:hover { opacity: 0.9; }
         .saver-cardkey-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .saver-cardkey-btn-row { display: flex; gap: 8px; margin-top: 12px; }
+        .saver-cardkey-btn-row .saver-cardkey-btn { margin-top: 0; }
         .saver-cardkey-msg { margin-top: 12px; font-size: 12px; min-height: 18px; }
         .saver-cardkey-msg.error { color: #ef4444; }
         .saver-cardkey-msg.success { color: #10a37f; }
@@ -445,7 +641,20 @@
       const onMouseDown = (e) => { if (e.button !== 0) return; isDragging = true; hasMoved = false; btn.classList.add('dragging'); const rect = btn.getBoundingClientRect(); startX = e.clientX; startY = e.clientY; startLeft = rect.left; startTop = rect.top; e.preventDefault(); };
       const onMouseMove = (e) => { if (!isDragging) return; const dx = e.clientX - startX, dy = e.clientY - startY; if (Math.abs(dx) > 5 || Math.abs(dy) > 5) hasMoved = true; let nl = startLeft + dx, nt = startTop + dy; nl = Math.max(0, Math.min(nl, window.innerWidth - btn.offsetWidth)); nt = Math.max(0, Math.min(nt, window.innerHeight - btn.offsetHeight)); btn.style.right = 'auto'; btn.style.bottom = 'auto'; btn.style.left = nl + 'px'; btn.style.top = nt + 'px'; };
       const onMouseUp = () => { if (!isDragging) return; isDragging = false; btn.classList.remove('dragging'); if (hasMoved) { const rect = btn.getBoundingClientRect(); chrome.storage.local.set({ btnPosition: { left: rect.left, top: rect.top } }); } };
-      const onClick = (e) => { if (hasMoved) { e.preventDefault(); e.stopPropagation(); hasMoved = false; return; } if (!CardKeyManager.verified) { this.showCardKeyOverlay(); return; } this.togglePanel(); };
+      const onClick = (e) => {
+        if (hasMoved) {
+          e.preventDefault();
+          e.stopPropagation();
+          hasMoved = false;
+          return;
+        }
+        const unavailableMessage = CardKeyManager.getUnavailableMessage();
+        if (!CardKeyManager.canUseNow()) {
+          this.showCardKeyOverlay(unavailableMessage);
+          return;
+        }
+        this.togglePanel();
+      };
       btn.addEventListener('mousedown', onMouseDown); document.addEventListener('mousemove', onMouseMove); document.addEventListener('mouseup', onMouseUp); btn.addEventListener('click', onClick);
     },
 
@@ -621,6 +830,8 @@
 
       // 导出按钮 - 手动点击强制导出
       document.getElementById('saver-export-btn').onclick = async () => {
+        const unavailableMessage = CardKeyManager.getUnavailableMessage();
+        if (!CardKeyManager.canUseNow()) { this.showCardKeyOverlay(unavailableMessage); return; }
         if (!window.ChatGPTSaver.Exporter.canExport()) { this.showToast('没有可导出的内容', 'error'); return; }
         this.showToast('💾 正在导出...', 'saving', 0);
         const result = await window.ChatGPTSaver.Exporter.exportConversation(config.formats, true);
@@ -647,6 +858,8 @@
       };
 
       document.getElementById('saver-export-selected').onclick = async () => {
+        const unavailableMessage = CardKeyManager.getUnavailableMessage();
+        if (!CardKeyManager.canUseNow()) { this.showCardKeyOverlay(unavailableMessage); return; }
         const sm = window.ChatGPTSaver.SelectionManager;
         if (!sm || sm.selectedCount() === 0) return;
         const allMessages = window.ChatGPTSaver.Parser.parseConversation().messages;
@@ -758,7 +971,19 @@
     // 显示卡密输入弹窗
     showCardKeyOverlay(message = '') {
       let overlay = document.getElementById('saver-cardkey-overlay');
-      if (overlay) { overlay.style.display = 'flex'; return; }
+      if (overlay) {
+        overlay.style.display = 'flex';
+        const keyInput = document.getElementById('saver-cardkey-input');
+        const emailInput = document.getElementById('saver-cardkey-email-input');
+        const msg = document.getElementById('saver-cardkey-msg');
+        if (keyInput) keyInput.value = CardKeyManager.cardData?.card_key || '';
+        if (emailInput) emailInput.value = CardKeyManager.cardData?.email || '';
+        if (msg) {
+          msg.textContent = message;
+          msg.className = message ? 'saver-cardkey-msg error' : 'saver-cardkey-msg';
+        }
+        return;
+      }
       overlay = document.createElement('div');
       overlay.id = 'saver-cardkey-overlay';
       overlay.className = 'saver-cardkey-overlay';
@@ -767,9 +992,13 @@
           <button id="saver-cardkey-close" style="position: absolute; top: 12px; right: 12px; background: none; border: none; font-size: 20px; cursor: pointer; color: var(--saver-sub-text, #999); line-height: 1; padding: 4px;">✕</button>
           <img src="${chrome.runtime.getURL('icons/logo.jpg')}" style="width: 80px; height: 80px; border-radius: 50%; margin: 0 auto 12px; display: block; box-shadow: 0 4px 12px rgba(0,0,0,0.1); object-fit: cover;" />
           <h3>激活 ChatGPT 对话保存助手</h3>
-          <p>请输入卡密以激活插件功能</p>
+          <p>请输入卡密和邮箱，绑定当前设备</p>
           <input type="text" class="saver-cardkey-input" id="saver-cardkey-input" placeholder="请输入卡密" autocomplete="off" />
-          <button class="saver-cardkey-btn" id="saver-cardkey-submit">🔑 验证激活</button>
+          <input type="email" class="saver-cardkey-input" id="saver-cardkey-email-input" placeholder="请输入绑定邮箱" autocomplete="off" style="margin-top: 10px;" />
+          <div class="saver-cardkey-btn-row">
+            <button class="saver-cardkey-btn" id="saver-cardkey-submit">🔑 验证激活</button>
+            <button class="saver-cardkey-btn secondary" id="saver-cardkey-rebind">🔄 换绑设备</button>
+          </div>
           <div class="saver-cardkey-msg" id="saver-cardkey-msg">${message}</div>
         </div>
       `;
@@ -779,38 +1008,111 @@
       document.getElementById('saver-cardkey-close').onclick = () => { overlay.style.display = 'none'; };
 
       const input = document.getElementById('saver-cardkey-input');
+      const emailInput = document.getElementById('saver-cardkey-email-input');
       const btn = document.getElementById('saver-cardkey-submit');
+      const rebindBtn = document.getElementById('saver-cardkey-rebind');
       const msg = document.getElementById('saver-cardkey-msg');
 
-      const doVerify = async () => {
-        const key = input.value.trim();
-        if (!key) { msg.textContent = '请输入卡密'; msg.className = 'saver-cardkey-msg error'; input.classList.add('error'); return; }
+      const resetButtonState = () => {
+        btn.disabled = false;
+        rebindBtn.disabled = false;
+        btn.textContent = '🔑 验证激活';
+        rebindBtn.textContent = '🔄 换绑设备';
+      };
+
+      const setLoadingState = (mode) => {
         btn.disabled = true;
-        btn.textContent = '⏳ 验证中...';
-        msg.textContent = '';
+        rebindBtn.disabled = true;
+        btn.textContent = mode === 'activate' ? '⏳ 激活中...' : '🔑 验证激活';
+        rebindBtn.textContent = mode === 'rebind' ? '⏳ 换绑中...' : '🔄 换绑设备';
+      };
+
+      const getFormValue = () => {
+        const key = input.value.trim();
+        const email = emailInput.value.trim();
         input.classList.remove('error');
-        const result = await CardKeyManager.verify(key);
-        if (result.valid) {
-          msg.textContent = '✅ 激活成功！';
-          msg.className = 'saver-cardkey-msg success';
-          btn.textContent = '✅ 已激活';
-          setTimeout(() => {
-            overlay.style.display = 'none';
-            this.updateCardKeyBadge();
-            initAfterCardKey();
-          }, 800);
-        } else {
-          msg.textContent = result.message || '卡密无效';
+        emailInput.classList.remove('error');
+        if (!key) {
+          msg.textContent = '请输入卡密';
           msg.className = 'saver-cardkey-msg error';
           input.classList.add('error');
-          btn.disabled = false;
-          btn.textContent = '🔑 验证激活';
+          return null;
+        }
+        if (!email) {
+          msg.textContent = '请输入邮箱';
+          msg.className = 'saver-cardkey-msg error';
+          emailInput.classList.add('error');
+          return null;
+        }
+        return { key, email };
+      };
+
+      const getSuccessMessageByCardType = () => {
+        if (CardKeyManager.isDaypass()) return '✅ 日抛卡已激活';
+        if (CardKeyManager.isUnlimited()) return '✅ 无限版已激活';
+        return '✅ 时长卡已激活';
+      };
+
+      const normalizeFailureMessage = (text) => {
+        const raw = String(text || '').trim();
+        if ((CardKeyManager.isDaypass() || /日抛|daypass/i.test(raw)) && /过期|到期|expired/i.test(raw)) {
+          return '日抛卡已到期，请重新激活';
+        }
+        return raw || '卡密无效';
+      };
+
+      const onSuccess = () => {
+        msg.textContent = getSuccessMessageByCardType();
+        msg.className = 'saver-cardkey-msg success';
+        btn.textContent = '✅ 已激活';
+        rebindBtn.textContent = '✅ 已换绑';
+        this.updateCardKeyBadge();
+        initAfterCardKey();
+        setTimeout(() => {
+          overlay.style.display = 'none';
+          resetButtonState();
+        }, 800);
+      };
+
+      const onFailure = (text) => {
+        msg.textContent = normalizeFailureMessage(text);
+        msg.className = 'saver-cardkey-msg error';
+        resetButtonState();
+      };
+
+      const doActivate = async () => {
+        const formData = getFormValue();
+        if (!formData) return;
+        setLoadingState('activate');
+        msg.textContent = '';
+        const result = await CardKeyManager.activate(formData.key, formData.email);
+        if (result.valid) {
+          onSuccess();
+        } else {
+          onFailure(result.message || '激活失败');
         }
       };
 
-      btn.onclick = doVerify;
-      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') doVerify(); });
-      input.focus();
+      const doRebind = async () => {
+        const formData = getFormValue();
+        if (!formData) return;
+        setLoadingState('rebind');
+        msg.textContent = '';
+        const result = await CardKeyManager.rebind(formData.key, formData.email);
+        if (result.valid) {
+          onSuccess();
+        } else {
+          onFailure(result.message || '换绑失败');
+        }
+      };
+
+      input.value = CardKeyManager.cardData?.card_key || '';
+      emailInput.value = CardKeyManager.cardData?.email || '';
+      btn.onclick = doActivate;
+      rebindBtn.onclick = doRebind;
+      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') doActivate(); });
+      emailInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doActivate(); });
+      (input.value ? emailInput : input).focus();
     },
 
     hideCardKeyOverlay() {
@@ -821,27 +1123,53 @@
     updateCardKeyBadge() {
       const badge = document.getElementById('saver-cardkey-badge');
       if (!badge) return;
-      if (CardKeyManager.verified) {
-        const days = CardKeyManager.getRemainingDays();
-        badge.style.display = 'inline-block';
-        badge.textContent = `🔑 剩余 ${days} 天`;
-        if (days <= 3) badge.style.color = '#ef4444';
-        else badge.style.color = '';
-      } else {
+      if (!CardKeyManager.canUseNow()) {
         badge.style.display = 'none';
+        return;
       }
+
+      const now = Date.now();
+      const days = CardKeyManager.getRemainingDays();
+      const expiryTs = CardKeyManager.getExpiryTimestamp();
+      badge.style.display = 'inline-block';
+
+      if (CardKeyManager.isUnlimited()) {
+        badge.textContent = '🔑 无限版';
+        badge.style.color = '';
+        return;
+      }
+
+      if (CardKeyManager.isDaypass()) {
+        const remainMs = Math.max(0, (expiryTs || now) - now);
+        if (remainMs <= 24 * 60 * 60 * 1000) {
+          const remainHours = Math.max(1, Math.ceil(remainMs / (60 * 60 * 1000)));
+          badge.textContent = `🕒 日抛 剩余 ${remainHours} 小时`;
+          badge.style.color = '#ef4444';
+          return;
+        }
+
+        const remainDays = Math.max(1, Math.ceil(remainMs / (24 * 60 * 60 * 1000)));
+        badge.textContent = `🕒 日抛 剩余 ${remainDays} 天`;
+        badge.style.color = remainDays <= 3 ? '#ef4444' : '';
+        return;
+      }
+
+      const remainByDate = expiryTs && expiryTs > now
+        ? Math.max(1, Math.ceil((expiryTs - now) / (24 * 60 * 60 * 1000)))
+        : null;
+      const remainDays = remainByDate ?? (days !== null ? Math.max(0, Math.ceil(days)) : null);
+      if (remainDays === null) {
+        badge.style.display = 'none';
+        return;
+      }
+      badge.textContent = `🔑 剩余 ${remainDays} 天`;
+      badge.style.color = remainDays <= 3 ? '#ef4444' : '';
     },
 
     initCardKeyBadgeClick() {
       const badge = document.getElementById('saver-cardkey-badge');
       if (badge) {
-        badge.onclick = async () => {
-          if (confirm('是否要更换卡密？当前卡密将被清除。')) {
-            await CardKeyManager.logout();
-            this.updateCardKeyBadge();
-            this.showCardKeyOverlay();
-          }
-        };
+        badge.onclick = () => this.showCardKeyOverlay();
       }
     },
 
@@ -1855,7 +2183,14 @@
   }
 
   function startAutoSave() {
+    const unavailableMessage = CardKeyManager.getUnavailableMessage();
+    if (!CardKeyManager.canUseNow()) {
+      UI.showCardKeyOverlay(unavailableMessage);
+      UI.updateStatus();
+      return;
+    }
     window.ChatGPTSaver.Observer.start(async () => {
+      if (!CardKeyManager.canUseNow()) return;
       if (saveDebounceTimer) clearTimeout(saveDebounceTimer);
       if (window.ChatGPTSaver.FileSystem.isAuthorized()) {
         UI.showLog();

@@ -11,16 +11,19 @@
   if (window.fetch.__saverUsagePatched) return;
 
   const originalFetch = window.fetch;
-  const pendingAutoRequests = new Map();
+  const pendingConversationRequests = new Map();
 
   const normalizeModelKey = (value) => {
     const model = String(value || '').toLowerCase().trim();
     if (!model) return null;
+    if (model.includes('thinking') || model.includes('reasoning')) return 'gpt-5-2-thinking';
+    if (model.includes('instant')) return 'gpt-5-2-instant';
+    if (model.includes('pro')) return 'gpt-5-2-pro';
     if (model === 'auto') return 'gpt-5-2';
-    if (model === 'gpt-5-2-instant') return 'gpt-5-2';
-    if (model === 'gpt-5-2-thinking' || model === 'gpt-5-1-thinking') return 'gpt-5-thinking';
-    if (model === 'gpt-5-2-pro' || model === 'gpt-5-1-pro') return 'gpt-5-pro';
-    if (model === 'gpt-4-1') return 'gpt-4.1';
+    if (model === 'gpt-5-2-instant' || model === 'gpt-5-instant' || model === 'gpt-5' || model === 'gpt-5-1' || model === 'gpt-5.1') return 'gpt-5-2-instant';
+    if (model === 'gpt-5-2-thinking' || model === 'gpt-5-1-thinking' || model === 'gpt-5-thinking' || model === 'reasoning') return 'gpt-5-2-thinking';
+    if (model === 'gpt-5-2-pro' || model === 'gpt-5-1-pro' || model === 'gpt-5-pro') return 'gpt-5-2-pro';
+    if (model === 'gpt-5.2' || model === 'gpt5.2') return 'gpt-5-2';
     return model;
   };
 
@@ -28,8 +31,9 @@
     const slug = String(routedSlug || '').toLowerCase();
     const normalizedBase = normalizeModelKey(baseKey);
     if (normalizedBase === 'gpt-5-2') {
-      if (slug.includes('pro')) return 'gpt-5-pro';
-      if (didAutoSwitch === true || slug.includes('thinking') || slug.includes('reasoning')) return 'gpt-5-thinking';
+      if (slug.includes('pro')) return 'gpt-5-2-pro';
+      if (didAutoSwitch === true || slug.includes('thinking') || slug.includes('reasoning')) return 'gpt-5-2-thinking';
+      if (slug.includes('instant')) return 'gpt-5-2-instant';
       return 'gpt-5-2';
     }
     return normalizeModelKey(slug || normalizedBase);
@@ -52,13 +56,57 @@
     window.postMessage({ type: 'SAVER_RUNTIME_METRIC', metric }, '*');
   };
 
-  const resolveAutoRequest = (requestId, routed) => {
-    const req = pendingAutoRequests.get(requestId);
+  const resolveConversationRequest = (requestId, routed, source = 'response-routing') => {
+    const req = pendingConversationRequests.get(requestId);
     if (!req || req.resolved) return;
-    const modelKey = mapRoutedSlugToModelKey(req.baseModelKey, routed?.modelSlug, routed?.didAutoSwitchToReasoning);
+    let modelKey = null;
+    if (routed?.modelSlug || routed?.didAutoSwitchToReasoning !== undefined) {
+      modelKey = mapRoutedSlugToModelKey(req.baseModelKey || 'gpt-5-2', routed?.modelSlug, routed?.didAutoSwitchToReasoning);
+    }
+    if (!modelKey && req.baseModelKey) {
+      modelKey = normalizeModelKey(req.baseModelKey);
+    }
+    if (!modelKey) {
+      pendingConversationRequests.delete(requestId);
+      return;
+    }
     req.resolved = true;
-    postUsage(modelKey, { source: 'auto-routing', requestId });
-    pendingAutoRequests.delete(requestId);
+    postUsage(modelKey, { source, requestId });
+    pendingConversationRequests.delete(requestId);
+  };
+
+  const isConversationPost = (url, method) => (
+    method === 'POST'
+    && String(url).includes('/conversation')
+    && !String(url).includes('/conversations')
+  );
+
+  const getRequestBodyText = async (info, init) => {
+    const initBody = init?.body;
+    if (typeof initBody === 'string' && initBody.trim()) return initBody;
+    if (initBody && typeof initBody === 'object' && typeof initBody.toString === 'function' && initBody.constructor?.name === 'URLSearchParams') {
+      const text = initBody.toString();
+      if (text) return text;
+    }
+    if (info && typeof info === 'object' && typeof info.clone === 'function') {
+      try {
+        const text = await info.clone().text();
+        if (text && text.trim()) return text;
+      } catch {
+        // ignore
+      }
+    }
+    return '';
+  };
+
+  const extractConversationPayload = async (info, init) => {
+    const text = await getRequestBodyText(info, init);
+    if (!text) return null;
+    try {
+      return JSON.parse(text);
+    } catch {
+      return null;
+    }
   };
 
   const parseSse = async (response, onJson) => {
@@ -121,12 +169,59 @@
     return null;
   };
 
+  const parsePowLikeValue = (value) => {
+    if (value === null || value === undefined) return null;
+    if (Number.isFinite(Number(value))) {
+      const n = Number(value);
+      return n >= 0 ? n : null;
+    }
+    const text = String(value).trim();
+    if (!text) return null;
+    if (/^0x[0-9a-f]+$/i.test(text)) {
+      const n = Number.parseInt(text, 16);
+      return Number.isFinite(n) ? n : null;
+    }
+    if (/^[0-9a-f]{6,}$/i.test(text)) {
+      const n = Number.parseInt(text, 16);
+      return Number.isFinite(n) ? n : null;
+    }
+    const matched = text.match(/([0-9]+(?:\.[0-9]+)?)/);
+    if (matched) {
+      const n = Number(matched[1]);
+      return Number.isFinite(n) ? n : null;
+    }
+    return null;
+  };
+
+  const deepFindPowValue = (obj, depth = 0) => {
+    if (!obj || typeof obj !== 'object' || depth > 5) return null;
+    if (Array.isArray(obj)) {
+      for (const item of obj) {
+        const v = deepFindPowValue(item, depth + 1);
+        if (v !== null) return v;
+      }
+      return null;
+    }
+    for (const [k, v] of Object.entries(obj)) {
+      const key = String(k || '').toLowerCase();
+      if (key.includes('pow') || key.includes('proof') || key.includes('difficulty')) {
+        const parsed = parsePowLikeValue(v);
+        if (parsed !== null) return parsed;
+      }
+      if (v && typeof v === 'object') {
+        const nested = deepFindPowValue(v, depth + 1);
+        if (nested !== null) return nested;
+      }
+    }
+    return null;
+  };
+
   const extractPowValue = (json) => {
     if (!json || typeof json !== 'object') return null;
     const ste = json.server_ste_metadata || {};
     const msgMeta = json.message?.metadata || {};
     const obj = json || {};
-    return pickFirstFinite(
+    const direct = pickFirstFinite(
       obj.pow_difficulty,
       obj.powDifficulty,
       obj.pow,
@@ -137,6 +232,41 @@
       msgMeta.powDifficulty,
       msgMeta.pow
     );
+    if (direct !== null) return direct;
+
+    const proofPayload = obj.proof_of_work || obj.proofofwork || obj.pow_config || obj.powConfig || obj.chat_requirements || obj.requirements || null;
+    const fromProofPayload = deepFindPowValue(proofPayload);
+    if (fromProofPayload !== null) return fromProofPayload;
+
+    return deepFindPowValue(obj);
+  };
+
+  const extractPowFromHeaders = (headers) => {
+    if (!headers || typeof headers.forEach !== 'function') return null;
+    let value = null;
+    headers.forEach((headerValue, headerName) => {
+      if (value !== null) return;
+      const key = String(headerName || '').toLowerCase();
+      if (key.includes('pow') || key.includes('proof') || key.includes('difficulty')) {
+        const parsed = parsePowLikeValue(headerValue);
+        if (parsed !== null) value = parsed;
+      }
+    });
+    return value;
+  };
+
+  const extractAccountTypeFromHeaders = (headers) => {
+    if (!headers || typeof headers.forEach !== 'function') return null;
+    let accountType = null;
+    headers.forEach((headerValue, headerName) => {
+      if (accountType) return;
+      const key = String(headerName || '').toLowerCase();
+      if (key.includes('plan') || key.includes('account') || key.includes('subscription') || key.includes('tier')) {
+        const mapped = normalizeAccountType(headerValue);
+        if (mapped) accountType = mapped;
+      }
+    });
+    return accountType;
   };
 
   const normalizeAccountType = (value) => {
@@ -187,38 +317,35 @@
 
   window.fetch = new Proxy(originalFetch, {
     apply: async function (target, thisArg, args) {
-      let autoRequestId = null;
+      let conversationRequestId = null;
       const [info, init] = args;
       const url = typeof info === 'string' ? info : info?.url || '';
-      const method = init?.method || (typeof info === 'object' && info?.method) || 'GET';
+      const method = String(init?.method || (typeof info === 'object' && info?.method) || 'GET').toUpperCase();
 
       if (method === 'POST') interceptFileUpload(url, init);
 
       try {
-        if (method === 'POST' && String(url).includes('/conversation') && !String(url).includes('/conversations')) {
-          const bodyRaw = init?.body;
-          if (typeof bodyRaw === 'string' && bodyRaw.trim()) {
-            const body = JSON.parse(bodyRaw);
-            const normalized = normalizeModelKey(body?.model);
-            if (normalized) {
-              if (normalized === 'gpt-5-2') {
-                autoRequestId = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-                pendingAutoRequests.set(autoRequestId, {
-                  baseModelKey: normalized,
-                  startedAt: Date.now(),
-                  resolved: false
-                });
-                setTimeout(() => {
-                  const req = pendingAutoRequests.get(autoRequestId);
-                  if (req && !req.resolved) {
-                    postUsage(req.baseModelKey, { source: 'request-timeout', requestId: autoRequestId });
-                    pendingAutoRequests.delete(autoRequestId);
-                  }
-                }, 60 * 1000);
-              } else {
-                postUsage(normalized, { source: 'request' });
+        if (isConversationPost(url, method)) {
+          conversationRequestId = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+          const body = await extractConversationPayload(info, init);
+          const normalized = normalizeModelKey(body?.model);
+          if (normalized && normalized !== 'gpt-5-2') {
+            // 非 Auto 模式可以在请求发起时立即计数，实现实时更新。
+            postUsage(normalized, { source: 'request', requestId: conversationRequestId });
+          } else {
+            // Auto 或无法读取请求体时，等待 SSE 路由结果，超时后兜底。
+            pendingConversationRequests.set(conversationRequestId, {
+              baseModelKey: normalized || null,
+              startedAt: Date.now(),
+              resolved: false
+            });
+            setTimeout(() => {
+              const req = pendingConversationRequests.get(conversationRequestId);
+              if (req && !req.resolved) {
+                if (req.baseModelKey) resolveConversationRequest(conversationRequestId, null, 'request-timeout');
+                else pendingConversationRequests.delete(conversationRequestId);
               }
-            }
+            }, 60 * 1000);
           }
         }
       } catch {
@@ -227,12 +354,26 @@
 
       const response = await target.apply(thisArg, args);
 
-      if (autoRequestId || String(url).includes('/conversation')) {
+      try {
+        const headerPow = extractPowFromHeaders(response?.headers);
+        const headerAccountType = extractAccountTypeFromHeaders(response?.headers);
+        if (headerPow !== null || headerAccountType) {
+          postRuntimeMetric({
+            powValue: headerPow,
+            accountType: headerAccountType || null,
+            timestamp: Date.now()
+          });
+        }
+      } catch {
+        // ignore
+      }
+
+      if (conversationRequestId || String(url).includes('/conversation')) {
         try {
           const clone = response.clone();
           parseSse(clone, (json) => {
             const info = extractRoutingInfo(json);
-            if (info && autoRequestId) resolveAutoRequest(autoRequestId, info);
+            if (info && conversationRequestId) resolveConversationRequest(conversationRequestId, info, 'response-routing');
 
             const powValue = extractPowValue(json);
             const accountType = extractAccountType(json);
@@ -244,6 +385,26 @@
               });
             }
           });
+        } catch {
+          // ignore
+        }
+      }
+
+      const lowerUrl = String(url || '').toLowerCase();
+      if (lowerUrl.includes('chat-requirements') || lowerUrl.includes('/sentinel/') || lowerUrl.includes('proof_of_work')) {
+        try {
+          const clone = response.clone();
+          const json = await clone.json();
+          const powValue = extractPowValue(json);
+          const accountType = extractAccountType(json);
+          if (powValue !== null || accountType) {
+            postRuntimeMetric({
+              powValue: powValue !== null ? powValue : null,
+              accountType: accountType || null,
+              source: 'chat-requirements',
+              timestamp: Date.now()
+            });
+          }
         } catch {
           // ignore
         }

@@ -314,47 +314,33 @@
   const UsageMonitor = {
     STORAGE_KEY: 'usageDataV2',
     MANUAL_ACCOUNT_KEY: 'accountTypeManualOverride',
+    ACCOUNT_DETECT_TTL_MS: 30 * 1000,
     initialized: false,
     data: null,
     aliasToModelId: {},
     updateTimer: null,
     _manualAccountType: null,
+    _accountDetectCache: { value: 'unknown', updatedAt: 0 },
 
     MODEL_RULES: [
-      { id: 'gpt-5-2', label: 'GPT-5.2', limit: 10000, windowMs: 3 * 60 * 60 * 1000, aliases: ['auto', 'gpt-5.2', 'gpt-5-2', 'gpt5.2', 'gpt-5-2-instant'] },
-      { id: 'gpt-5-1', label: 'GPT-5.1', limit: 10000, windowMs: 3 * 60 * 60 * 1000, aliases: ['gpt-5.1', 'gpt-5-1', 'gpt5.1'] },
-      { id: 'gpt-5', label: 'GPT-5', limit: 10000, windowMs: 3 * 60 * 60 * 1000, aliases: ['gpt-5'] },
-      { id: 'gpt-5-thinking', label: 'GPT-5-Thinking', limit: 3000, windowMs: 7 * 24 * 60 * 60 * 1000, aliases: ['gpt-5-thinking', 'gpt-5-2-thinking', 'gpt-5-1-thinking', 'gpt-5-reasoning', 'reasoning'] },
-      { id: 'gpt-5-pro', label: 'GPT-5-Pro', limit: 15, windowMs: 30 * 24 * 60 * 60 * 1000, aliases: ['gpt-5-pro', 'gpt-5-2-pro', 'gpt-5-1-pro'] },
-      { id: 'gpt-4o', label: 'GPT-4o', limit: 80, windowMs: 3 * 60 * 60 * 1000, aliases: ['gpt-4o'] },
-      { id: 'gpt-4', label: 'GPT-4', limit: 40, windowMs: 3 * 60 * 60 * 1000, aliases: ['gpt-4'] },
-      { id: 'gpt-4.1', label: 'GPT-4.1', limit: 80, windowMs: 3 * 60 * 60 * 1000, aliases: ['gpt-4.1', 'gpt-4-1'] },
-      { id: 'o3', label: 'o3', limit: 100, windowMs: 7 * 24 * 60 * 60 * 1000, aliases: ['o3'] },
-      { id: 'o3-pro', label: 'o3-pro', limit: 15, windowMs: 30 * 24 * 60 * 60 * 1000, aliases: ['o3-pro'] },
-      { id: 'o4-mini', label: 'o4-mini', limit: 300, windowMs: 24 * 60 * 60 * 1000, aliases: ['o4-mini'] },
-      { id: 'o4-mini-high', label: 'o4-mini-high', limit: 100, windowMs: 24 * 60 * 60 * 1000, aliases: ['o4-mini-high'] },
-      { id: 'o1-pro', label: 'o1-pro', limit: 50, windowMs: 7 * 24 * 60 * 60 * 1000, aliases: ['o1-pro'] }
+      { id: 'gpt-5-2', label: 'Auto', limit: 10000, windowMs: 3 * 60 * 60 * 1000, aliases: ['auto', 'gpt-5.2', 'gpt-5-2', 'gpt5.2'] },
+      { id: 'gpt-5-2-instant', label: 'Instant', limit: 10000, windowMs: 3 * 60 * 60 * 1000, aliases: ['gpt-5-2-instant', 'gpt-5-instant', 'gpt-5', 'gpt-5.1', 'gpt-5-1', 'gpt5.1'] },
+      { id: 'gpt-5-2-thinking', label: 'Thinking', limit: 3000, windowMs: 7 * 24 * 60 * 60 * 1000, aliases: ['gpt-5-2-thinking', 'gpt-5-thinking', 'gpt-5-1-thinking', 'reasoning'] },
+      { id: 'gpt-5-2-pro', label: 'Pro', limit: 15, windowMs: 30 * 24 * 60 * 60 * 1000, aliases: ['gpt-5-2-pro', 'gpt-5-pro', 'gpt-5-1-pro'] }
     ],
 
     PLAN_PRESETS: {
       free: {
-        'gpt-4o': { limit: 10, windowMs: 3 * 60 * 60 * 1000 },
-        'gpt-5-thinking': { limit: 10, windowMs: 5 * 60 * 60 * 1000 },
-        'gpt-5-pro': { limit: 0, windowMs: 30 * 24 * 60 * 60 * 1000 },
-        'o3': { limit: 0, windowMs: 7 * 24 * 60 * 60 * 1000 },
-        'o3-pro': { limit: 0, windowMs: 30 * 24 * 60 * 60 * 1000 }
+        'gpt-5-2-thinking': { limit: 10, windowMs: 5 * 60 * 60 * 1000 },
+        'gpt-5-2-pro': { limit: 0, windowMs: 30 * 24 * 60 * 60 * 1000 }
       },
       plus: {},
       pro: {
-        'gpt-5-pro': { limit: 100, windowMs: 24 * 60 * 60 * 1000 },
-        'o3-pro': { limit: 100, windowMs: 24 * 60 * 60 * 1000 },
-        'gpt-5-thinking': { limit: 10000, windowMs: 3 * 60 * 60 * 1000 }
+        'gpt-5-2-pro': { limit: 100, windowMs: 24 * 60 * 60 * 1000 },
+        'gpt-5-2-thinking': { limit: 10000, windowMs: 3 * 60 * 60 * 1000 }
       },
       team: {},
-      enterprise: {
-        'gpt-4o': { limit: 500, windowMs: 3 * 60 * 60 * 1000 },
-        'gpt-4.1': { limit: 500, windowMs: 3 * 60 * 60 * 1000 }
-      },
+      enterprise: {},
       unknown: {}
     },
 
@@ -398,6 +384,17 @@
       return 'unknown';
     },
 
+    _detectAccountTypeFromText(text) {
+      const bodyText = String(text || '').toLowerCase();
+      if (!bodyText) return 'unknown';
+      if (/\benterprise\b|企业版|企业账户/.test(bodyText)) return 'enterprise';
+      if (/\bteam\b|团队版|团队账户/.test(bodyText)) return 'team';
+      if (/\bplus\b|plus会员|plus版/.test(bodyText)) return 'plus';
+      if (/\bpro\b|专业版/.test(bodyText)) return 'pro';
+      if (/\bfree\b|免费版|升级到|upgrade/.test(bodyText)) return 'free';
+      return 'unknown';
+    },
+
     _normalizeModelKey(modelKey) {
       const raw = String(modelKey || '').toLowerCase().trim();
       if (!raw) return null;
@@ -406,7 +403,7 @@
 
     _hydrateAccountTypeFromPage() {
       if (this._manualAccountType) return;
-      const detected = this.detectAccountType();
+      const detected = this.detectAccountType(true);
       if (detected !== 'unknown') {
         this.data.accountType = detected;
         this.data.planType = detected;
@@ -508,22 +505,49 @@
       if (normalized) {
         this.data.accountType = normalized;
         this.data.planType = normalized;
+        this._accountDetectCache = { value: normalized, updatedAt: Date.now() };
       } else {
-        const auto = this.detectAccountType();
+        const auto = this.detectAccountType(true);
         this.data.accountType = auto;
         this.data.planType = auto;
       }
       await this.saveData();
     },
 
-    detectAccountType() {
-      const bodyText = `${document.body?.innerText || ''} ${document.title || ''}`.toLowerCase();
-      if (/\benterprise|企业版\b/.test(bodyText)) return 'enterprise';
-      if (/\bteam\b/.test(bodyText)) return 'team';
-      if (/\bpro\b/.test(bodyText)) return 'pro';
-      if (/\bplus\b/.test(bodyText)) return 'plus';
-      if (/\bfree|免费版|升级\b/.test(bodyText)) return 'free';
-      return 'unknown';
+    detectAccountType(force = false) {
+      if (this._manualAccountType) return this._manualAccountType;
+      const now = Date.now();
+      if (!force && this._accountDetectCache.value && (now - this._accountDetectCache.updatedAt) < this.ACCOUNT_DETECT_TTL_MS) {
+        return this._accountDetectCache.value;
+      }
+
+      let detected = 'unknown';
+
+      // 1) 工作空间名优先（最快且通常最准确）
+      const workspaceName = this._getWorkspace();
+      detected = this._detectAccountTypeFromText(workspaceName);
+
+      // 2) 轻量 DOM 信号（避免整页 innerText 导致卡顿）
+      if (detected === 'unknown') {
+        const signalParts = [];
+        signalParts.push(document.title || '');
+        const quickSelectors = [
+          '[data-testid="profile-menu-button"]',
+          '[data-testid*="account"]',
+          '[data-testid*="workspace"]',
+          'header',
+          'nav'
+        ];
+        quickSelectors.forEach((selector) => {
+          const el = document.querySelector(selector);
+          const text = el?.textContent ? String(el.textContent).slice(0, 800) : '';
+          if (text) signalParts.push(text);
+        });
+        detected = this._detectAccountTypeFromText(signalParts.join(' '));
+      }
+
+      this._accountDetectCache = { value: detected, updatedAt: now };
+      return detected;
     },
 
     getAccountType() {
@@ -571,6 +595,7 @@
       if (!this._manualAccountType && accountType !== 'unknown') {
         this.data.accountType = accountType;
         this.data.planType = accountType;
+        this._accountDetectCache = { value: accountType, updatedAt: now };
       }
 
       this.saveData();
@@ -590,6 +615,7 @@
       if (!this._manualAccountType && accountType !== 'unknown') {
         this.data.accountType = accountType;
         this.data.planType = accountType;
+        this._accountDetectCache = { value: accountType, updatedAt: now };
       }
 
       this.saveData();

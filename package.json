@@ -4,7 +4,9 @@
   "description": "",
   "main": "chatgpt-saver.user.js",
   "scripts": {
-    "test": "vitest --run"
+    "test": "vitest --run",
+    "build:pdf-v2": "node scripts/build-pdf-v2.mjs",
+    "build": "npm run build:pdf-v2"
   },
   "repository": {
     "type": "git",
@@ -19,7 +21,11 @@
   },
   "homepage": "https://github.com/a182860089-pixel/massage#readme",
   "devDependencies": {
+    "@react-pdf/renderer": "^4.3.2",
+    "esbuild": "^0.27.3",
     "fast-check": "^4.5.3",
+    "jsdom": "^28.1.0",
+    "react": "^19.2.4",
     "vitest": "^4.0.18"
   }
 }

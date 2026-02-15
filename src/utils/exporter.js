@@ -113,12 +113,23 @@ const Exporter = {
         } else {
           const pdfMode = options.pdfMode === 'visual' ? 'visual' : 'structured';
           this.log(`🧭 PDF 模式: ${pdfMode === 'structured' ? '结构化' : '视觉还原'}`);
-          // 使用带重试的导出，更稳定；传递进度回调
-          const onProgress = (current, total) => {
-            this.log(`📦 正在导出 ${current}/${total} 条消息...`);
+          // 进度回调节流，避免频繁日志与 toast 触发重排
+          let lastEmitTime = 0;
+          let lastPct = -1;
+          const onProgress = (current, total, detail = null) => {
+            const safeTotal = Math.max(1, Number(total) || 1);
+            const safeCurrent = Math.max(0, Math.min(Number(current) || 0, safeTotal));
+            const pct = Math.round((safeCurrent / safeTotal) * 100);
+            const now = Date.now();
+            const shouldEmit = safeCurrent === safeTotal || pct !== lastPct || (now - lastEmitTime) >= 100;
+            if (!shouldEmit) return;
+
+            lastPct = pct;
+            lastEmitTime = now;
+            const stage = detail?.stage ? `[${detail.stage}] ` : '';
+            this.log(`📦 ${stage}正在导出 ${safeCurrent}/${safeTotal} 条消息 (${pct}%)...`);
             if (window.ChatGPTSaver.UI && window.ChatGPTSaver.UI.showToast) {
-              const pct = Math.round((current / total) * 100);
-              window.ChatGPTSaver.UI.showToast(`📦 正在导出 ${current}/${total} 条消息 (${pct}%)`, 'saving', 0);
+              window.ChatGPTSaver.UI.showToast(`📦 ${stage}正在导出 ${safeCurrent}/${safeTotal} 条消息 (${pct}%)`, 'saving', 0);
             }
           };
           pdfBlob = await window.ChatGPTSaver.PDFExporter.exportWithFallback({ mode: pdfMode, onProgress });

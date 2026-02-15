@@ -15,20 +15,33 @@ const PDFExporter = {
    * 检查 PDF 导出是否可用
    */
   isAvailable() {
-    return typeof html2canvas !== 'undefined' && typeof jspdf !== 'undefined';
+    const legacyReady = typeof html2canvas !== 'undefined' && typeof jspdf !== 'undefined';
+    const v2Ready = !!(
+      window.ChatGPTSaver?.PDFASTBuilder &&
+      window.ChatGPTSaver?.PDFWorkerBridge &&
+      typeof window.ChatGPTSaver.PDFWorkerBridge.isSupported === 'function' &&
+      window.ChatGPTSaver.PDFWorkerBridge.isSupported()
+    );
+    return legacyReady || v2Ready;
   },
   
   /**
    * 获取不可用的原因
    */
   getUnavailableReason() {
-    if (typeof html2canvas === 'undefined') {
-      return 'html2canvas 库未加载';
-    }
-    if (typeof jspdf === 'undefined') {
-      return 'jsPDF 库未加载';
-    }
-    return null;
+    const hasBuilder = !!window.ChatGPTSaver?.PDFASTBuilder;
+    const hasBridge = !!window.ChatGPTSaver?.PDFWorkerBridge;
+    const workerOk = !!window.ChatGPTSaver?.PDFWorkerBridge?.isSupported?.();
+    const legacyReady = typeof html2canvas !== 'undefined' && typeof jspdf !== 'undefined';
+    if (legacyReady || (hasBuilder && hasBridge && workerOk)) return null;
+
+    const reasons = [];
+    if (typeof html2canvas === 'undefined') reasons.push('html2canvas 库未加载');
+    if (typeof jspdf === 'undefined') reasons.push('jsPDF 库未加载');
+    if (!hasBuilder) reasons.push('PDFASTBuilder 未加载');
+    if (!hasBridge) reasons.push('PDFWorkerBridge 未加载');
+    if (hasBridge && !workerOk) reasons.push('Worker 环境不可用');
+    return reasons.join(' | ');
   },
 
   _containsNonAscii(text) {
@@ -60,7 +73,17 @@ const PDFExporter = {
     const candidates = [];
     try {
       if (typeof chrome !== 'undefined' && chrome.runtime?.getURL) {
-        candidates.push(chrome.runtime.getURL('src/lib/NotoSansSC-Regular.ttf'));
+        const manifest = chrome.runtime.getManifest?.();
+        const webResources = Array.isArray(manifest?.web_accessible_resources)
+          ? manifest.web_accessible_resources
+          : [];
+        const listedInManifest = webResources.some((entry) =>
+          Array.isArray(entry?.resources) && entry.resources.includes('src/lib/NotoSansSC-Regular.ttf')
+        );
+        // 仅当 manifest 明确暴露字体资源时才尝试本地扩展 URL，避免控制台出现权限拦截噪音
+        if (listedInManifest) {
+          candidates.push(chrome.runtime.getURL('src/lib/NotoSansSC-Regular.ttf'));
+        }
       }
     } catch (e) {
       // ignore
@@ -933,6 +956,70 @@ const PDFExporter = {
     }
   },
 
+  _supportsStructuredV2() {
+    return !!(
+      window.ChatGPTSaver?.PDFASTBuilder &&
+      window.ChatGPTSaver?.PDFWorkerBridge &&
+      typeof window.ChatGPTSaver.PDFASTBuilder.buildConversationAst === 'function' &&
+      typeof window.ChatGPTSaver.PDFWorkerBridge.exportWithWorker === 'function' &&
+      window.ChatGPTSaver.PDFWorkerBridge.isSupported?.()
+    );
+  },
+
+  cancelStructuredV2(reason = 'cancelled by user') {
+    const bridge = window.ChatGPTSaver?.PDFWorkerBridge;
+    if (bridge && typeof bridge.cancelCurrentTask === 'function') {
+      bridge.cancelCurrentTask(reason);
+    }
+  },
+
+  async exportStructuredV2(options = {}) {
+    if (!this._supportsStructuredV2()) return null;
+
+    const parser = window.ChatGPTSaver.Parser;
+    const builder = window.ChatGPTSaver.PDFASTBuilder;
+    const bridge = window.ChatGPTSaver.PDFWorkerBridge;
+    const onProgress = typeof options.onProgress === 'function' ? options.onProgress : () => {};
+
+    const conversation = parser.parseConversation();
+    if (!conversation.messages.length) return null;
+    const workspace = parser.getWorkspaceName?.() || '';
+
+    try {
+      const request = await builder.buildConversationAst(conversation, {
+        workspace,
+        imageBudget: options.imageBudget,
+        requestOptions: {
+          quality: 'near-publish',
+          page: 'A4',
+          locale: 'zh-CN',
+          embedFonts: true
+        },
+        onProgress: (payload) => {
+          if (!payload) return;
+          onProgress(payload.current || 0, payload.total || conversation.messages.length, payload);
+        }
+      });
+
+      const result = await bridge.exportWithWorker(request, {
+        timeoutMs: Number(options.timeoutMs) || 240000,
+        onProgress: (payload) => {
+          if (!payload) return;
+          onProgress(payload.current || 0, payload.total || conversation.messages.length, payload);
+        }
+      });
+
+      if (result?.success && result.blob) return result.blob;
+      if (result?.error) {
+        console.warn('[PDF] structured-v2 失败，准备回退 legacy:', result.error.code, result.error.message);
+      }
+      return null;
+    } catch (error) {
+      console.error('[PDF] structured-v2 导出失败:', error);
+      return null;
+    }
+  },
+
   _createStructuredContext(title) {
     const { jsPDF } = jspdf;
     const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
@@ -1365,6 +1452,9 @@ const PDFExporter = {
     if (mode === 'visual') {
       return this.exportVisual(options);
     }
+
+    const structuredV2 = await this.exportStructuredV2(options);
+    if (structuredV2) return structuredV2;
 
     const structured = await this.exportStructured(options);
     if (structured) return structured;

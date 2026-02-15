@@ -45,6 +45,9 @@
         "src/lib/turndown.min.js",
         "src/lib/html2canvas.min.js",
         "src/lib/jspdf.umd.min.js",
+        "src/pdf-v2/normalizers.js",
+        "src/pdf-v2/astBuilder.js",
+        "src/pdf-v2/workerBridge.js",
         "src/utils/fileSystem.js",
         "src/utils/htmlExporter.js",
         "src/utils/mdExporter.js",
@@ -71,7 +74,10 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["icons/logo.jpg"],
+      "resources": [
+        "icons/logo.jpg",
+        "dist/pdfRender.worker.js"
+      ],
       "matches": ["https://chat.openai.com/*", "https://chatgpt.com/*"]
     }
   ]

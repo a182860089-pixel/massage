@@ -5,6 +5,10 @@
 const PDFExporter = {
   // 最大重试次数
   maxRetries: 2,
+  // 切片时预留少量像素，避免边界浮点误差导致的内容截断
+  sliceBoundarySafetyPx: 2,
+  // 关闭切片空白裁剪，优先保证跨页“无丢字”
+  enableSliceWhitespaceTrim: false,
   unicodeFontName: 'NotoSansSC',
   unicodeFontFile: 'ChatGPTSaver-NotoSansSC-Regular.otf',
   unicodeFontBinary: null,
@@ -172,27 +176,18 @@ const PDFExporter = {
       await new Promise(resolve => setTimeout(resolve, 100));
       
       // 使用 html2canvas 渲染
-      const canvas = await html2canvas(container, {
-        scale: 2,
-        useCORS: true,
-        logging: false,
-        backgroundColor: '#ffffff',
-        width: container.offsetWidth,
-        height: container.offsetHeight
-      });
+      const canvas = await this.renderElementToCanvas(container);
       
       // 移除临时容器
       document.body.removeChild(container);
       
-      const imgData = canvas.toDataURL('image/png');
-      
       // 计算图片在 PDF 中的尺寸
       const imgWidth = contentWidth;
-      const imgHeight = (canvas.height * imgWidth) / canvas.width;
-      
-      // 计算需要多少页
-      const totalPages = Math.ceil(imgHeight / contentHeight);
-      
+      const pxPerMm = this.computePxPerMm(canvas.width, imgWidth);
+      const pageHeightPx = Math.max(1, Math.floor(contentHeight * pxPerMm));
+      const slices = this.buildSlicePlan(canvas.height, pageHeightPx);
+      const totalPages = slices.length;
+
       for (let page = 0; page < totalPages; page++) {
         if (page > 0) {
           pdf.addPage();
@@ -200,32 +195,12 @@ const PDFExporter = {
         
         // 添加页眉
         this.addHeader(pdf, conversation.title, page + 1, pageWidth, margin);
-        
-        // 计算当前页的图片裁剪位置
-        const sourceY = page * contentHeight * (canvas.height / imgHeight);
-        const sourceHeight = Math.min(
-          contentHeight * (canvas.height / imgHeight),
-          canvas.height - sourceY
-        );
-        
-        // 创建当前页的画布
-        const pageCanvas = document.createElement('canvas');
-        pageCanvas.width = canvas.width;
-        pageCanvas.height = sourceHeight;
-        
-        const ctx = pageCanvas.getContext('2d');
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, pageCanvas.width, pageCanvas.height);
-        ctx.drawImage(
-          canvas,
-          0, sourceY,
-          canvas.width, sourceHeight,
-          0, 0,
-          canvas.width, sourceHeight
-        );
-        
+
+        const sourceY = slices[page].sourceY;
+        const sourceHeight = slices[page].sourceHeight;
+        const pageCanvas = this.createSliceCanvas(canvas, sourceY, sourceHeight);
         const pageImgData = pageCanvas.toDataURL('image/png');
-        const pageImgHeight = (sourceHeight * imgWidth) / canvas.width;
+        const pageImgHeight = pageCanvas.height / pxPerMm;
         
         // 添加图片到 PDF
         pdf.addImage(
@@ -315,49 +290,52 @@ const PDFExporter = {
     // 添加标题
     const header = document.createElement('div');
     header.style.cssText = `
-      text-align: center;
-      margin-bottom: 20px;
-      padding: 20px;
-      background: linear-gradient(135deg, #10a37f 0%, #0d8a6a 100%);
+      margin-bottom: 16px;
+      padding: 16px;
+      background: #ffffff;
+      border: 1px solid #e5e7eb;
       border-radius: 10px;
-      color: white;
+      color: #111827;
     `;
     header.innerHTML = `
-      <h1 style="margin: 0 0 8px 0; font-size: 20px; font-weight: 600;">${this.escapeHtml(conversation.title)}</h1>
-      <p style="margin: 0; font-size: 12px; opacity: 0.9;">
+      <h1 style="margin: 0 0 8px 0; font-size: 19px; line-height: 1.4; font-weight: 700;">${this.escapeHtml(conversation.title)}</h1>
+      <p style="margin: 0; font-size: 12px; color: #6b7280;">
         导出时间: ${new Date().toLocaleString('zh-CN')} | 共 ${conversation.messages.length} 条消息
       </p>
     `;
     container.appendChild(header);
     
     // 添加消息
-    conversation.messages.forEach((msg) => {
-      const isUser = msg.role === 'user';
-      const messageDiv = document.createElement('div');
-      messageDiv.style.cssText = `
-        margin: 15px 0;
-        padding: 15px;
-        border-radius: 8px;
-        background: ${isUser ? '#f0fdf4' : '#f8fafc'};
-        border-left: 4px solid ${isUser ? '#10a37f' : '#6366f1'};
-      `;
-      
-      const roleLabel = isUser ? '👤 用户' : '🤖 ChatGPT';
-      const roleColor = isUser ? '#10a37f' : '#6366f1';
-      
-      messageDiv.innerHTML = `
-        <div style="font-weight: 600; color: ${roleColor}; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid #e5e5e5; font-size: 14px;">
-          ${roleLabel}
-        </div>
-        <div style="color: #374151; font-size: 13px; line-height: 1.7; word-wrap: break-word;">
-          ${this.formatContent(msg.content)}
-        </div>
-      `;
-      
-      container.appendChild(messageDiv);
+    conversation.messages.forEach((msg, index) => {
+      container.insertAdjacentHTML('beforeend', this.buildVisualMessageHtml(msg, index));
     });
     
     return container;
+  },
+
+  buildVisualMessageHtml(msg, index = 0) {
+    const role = String(msg?.role || '').toLowerCase();
+    const isUser = role === 'user';
+    const isAssistant = role === 'assistant';
+    const roleLabel = isUser ? 'You' : (isAssistant ? 'ChatGPT' : 'System');
+    const roleBadge = isUser ? 'U' : (isAssistant ? 'G' : 'S');
+    const roleBadgeBg = isUser ? '#d1fae5' : (isAssistant ? '#dbeafe' : '#fee2e2');
+    const roleBadgeColor = isUser ? '#065f46' : (isAssistant ? '#1e40af' : '#991b1b');
+    const rowBg = isUser ? '#ffffff' : (isAssistant ? '#f6f7f8' : '#f9fafb');
+    const contentHtml = this.formatContent(msg?.content || '');
+
+    return `
+      <article style="display:grid;grid-template-columns:72px 1fr;gap:12px;margin:0 0 10px;padding:12px;border:1px solid #e5e7eb;border-radius:10px;background:${rowBg};">
+        <div style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#6b7280;">
+          <span style="display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:8px;font-weight:700;background:${roleBadgeBg};color:${roleBadgeColor};">${roleBadge}</span>
+          <span style="font-weight:600;color:#374151;">${roleLabel}</span>
+          <span style="font-size:10px;color:#9ca3af;">#${index + 1}</span>
+        </div>
+        <div style="color:#111827;font-size:13px;line-height:1.7;word-wrap:break-word;overflow-wrap:anywhere;">
+          ${contentHtml}
+        </div>
+      </article>
+    `;
   },
   
   /**
@@ -420,6 +398,51 @@ const PDFExporter = {
           color: #dc2626;
         `;
       }
+    });
+
+    temp.querySelectorAll('blockquote').forEach((quote) => {
+      quote.style.cssText = `
+        border-left: 3px solid #d1d5db;
+        background: #f3f4f6;
+        border-radius: 0 6px 6px 0;
+        padding: 8px 10px;
+        margin: 10px 0;
+        color: #4b5563;
+      `;
+    });
+
+    temp.querySelectorAll('table').forEach((table) => {
+      table.style.cssText = `
+        width: 100%;
+        border-collapse: collapse;
+        margin: 10px 0;
+        font-size: 12px;
+      `;
+    });
+    temp.querySelectorAll('th, td').forEach((cell) => {
+      cell.style.cssText = `
+        border: 1px solid #d1d5db;
+        padding: 6px 8px;
+        text-align: left;
+        vertical-align: top;
+      `;
+    });
+    temp.querySelectorAll('th').forEach((cell) => {
+      cell.style.background = '#f9fafb';
+      cell.style.fontWeight = '600';
+    });
+
+    temp.querySelectorAll('img').forEach((img) => {
+      img.style.maxWidth = '100%';
+      img.style.height = 'auto';
+      img.style.borderRadius = '8px';
+      img.style.border = '1px solid #e5e7eb';
+      img.style.display = 'block';
+      img.style.margin = '8px 0';
+    });
+
+    temp.querySelectorAll('ul, ol').forEach((list) => {
+      list.style.margin = '8px 0 10px 18px';
     });
 
     return temp.innerHTML;
@@ -493,6 +516,91 @@ const PDFExporter = {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+  },
+
+  /**
+   * 统一 html2canvas 渲染参数，优先使用元素滚动尺寸，降低截断概率
+   */
+  async renderElementToCanvas(element, overrides = {}) {
+    if (!element) throw new Error('render target is required');
+
+    const rect = typeof element.getBoundingClientRect === 'function'
+      ? element.getBoundingClientRect()
+      : { width: 0, height: 0 };
+    const width = Math.max(
+      1,
+      Math.ceil(
+        Number(overrides.width) ||
+        element.scrollWidth ||
+        element.offsetWidth ||
+        rect.width ||
+        1
+      )
+    );
+    const height = Math.max(
+      1,
+      Math.ceil(
+        Number(overrides.height) ||
+        element.scrollHeight ||
+        element.offsetHeight ||
+        rect.height ||
+        1
+      )
+    );
+    const windowWidth = Math.max(Number(overrides.windowWidth) || 0, document.documentElement?.clientWidth || 0, width);
+    const windowHeight = Math.max(Number(overrides.windowHeight) || 0, window.innerHeight || 0, height);
+
+    return html2canvas(element, {
+      scale: 2,
+      useCORS: true,
+      logging: false,
+      backgroundColor: '#ffffff',
+      ...overrides,
+      width,
+      height,
+      windowWidth,
+      windowHeight,
+      scrollX: 0,
+      scrollY: 0
+    });
+  },
+
+  computePxPerMm(canvasWidthPx, renderWidthMm) {
+    const widthPx = Math.max(1, Number(canvasWidthPx) || 1);
+    const widthMm = Math.max(1, Number(renderWidthMm) || 1);
+    return widthPx / widthMm;
+  },
+
+  computeSliceHeightPx(availableMm, pxPerMm, remainingPx) {
+    const remain = Math.max(0, Math.floor(Number(remainingPx) || 0));
+    if (remain <= 0) return 0;
+
+    const availablePx = Math.max(
+      0,
+      Math.floor(Math.max(0, Number(availableMm) || 0) * Math.max(0.001, Number(pxPerMm) || 0.001))
+    );
+    const safetyPx = Math.max(0, Math.floor(Number(this.sliceBoundarySafetyPx) || 0));
+    const target = Math.max(1, availablePx - safetyPx);
+    return Math.min(target, remain);
+  },
+
+  createSliceCanvas(canvas, sourceY, sourceHeight) {
+    const srcY = Math.max(0, Math.floor(Number(sourceY) || 0));
+    const srcHeight = Math.max(1, Math.floor(Number(sourceHeight) || 1));
+
+    const sliceCanvas = document.createElement('canvas');
+    sliceCanvas.width = canvas.width;
+    sliceCanvas.height = srcHeight;
+    const ctx = sliceCanvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, sliceCanvas.width, sliceCanvas.height);
+    ctx.drawImage(canvas, 0, srcY, canvas.width, srcHeight, 0, 0, canvas.width, srcHeight);
+    return sliceCanvas;
+  },
+
+  maybeTrimSlice(canvas, options = {}) {
+    if (!this.enableSliceWhitespaceTrim) return canvas;
+    return this.trimSliceWhitespace(canvas, options);
   },
 
   /**
@@ -635,11 +743,12 @@ const PDFExporter = {
   /**
    * 按消息分段生成 canvas 并组合为 PDF
    */
-  async exportSegmented() {
+  async exportSegmented(options = {}) {
     if (!this.isAvailable()) return null;
 
     const conversation = window.ChatGPTSaver.Parser.parseConversation();
     if (!conversation.messages.length) return null;
+    const onProgress = typeof options.onProgress === 'function' ? options.onProgress : () => {};
 
     try {
       const { jsPDF } = jspdf;
@@ -647,7 +756,6 @@ const PDFExporter = {
       const pageWidth = 210, pageHeight = 297, margin = 15;
       const headerHeight = 12, footerHeight = 12;
       const contentWidth = pageWidth - margin * 2;
-      const contentHeight = pageHeight - margin * 2 - headerHeight - footerHeight;
       const widthPx = contentWidth * 3.78;
 
       let currentY = margin + headerHeight;
@@ -656,15 +764,15 @@ const PDFExporter = {
       // 添加首页页眉
       this.addHeader(pdf, conversation.title, pageNum, pageWidth, margin);
 
-      for (const msg of conversation.messages) {
+      for (let messageIndex = 0; messageIndex < conversation.messages.length; messageIndex++) {
+        const msg = conversation.messages[messageIndex];
         const container = document.createElement('div');
-        container.style.cssText = `position:absolute;left:-9999px;top:0;width:${widthPx}px;background:white;font-family:-apple-system,sans-serif;padding:10px;font-size:14px;line-height:1.6;`;
-        const isUser = msg.role === 'user';
-        container.innerHTML = `<div style="padding:12px;border-radius:8px;background:${isUser ? '#f0fdf4' : '#f8fafc'};border-left:4px solid ${isUser ? '#10a37f' : '#6366f1'};margin:8px 0;"><div style="font-weight:600;color:${isUser ? '#10a37f' : '#6366f1'};margin-bottom:8px;font-size:14px;">${isUser ? '👤 用户' : '🤖 ChatGPT'}</div><div style="color:#374151;font-size:13px;line-height:1.7;">${this.formatContent(msg.content)}</div></div>`;
+        container.style.cssText = `position:absolute;left:-9999px;top:0;width:${widthPx}px;background:white;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:10px;font-size:14px;line-height:1.6;`;
+        container.innerHTML = this.buildVisualMessageHtml(msg, messageIndex);
         document.body.appendChild(container);
         await new Promise(r => setTimeout(r, 50));
 
-        const canvas = await html2canvas(container, { scale: 2, useCORS: true, logging: false, backgroundColor: '#ffffff' });
+        const canvas = await this.renderElementToCanvas(container);
         document.body.removeChild(container);
         if (this.isCanvasMostlyBlack(canvas)) {
           throw new Error('segmented-canvas-mostly-black');
@@ -682,12 +790,12 @@ const PDFExporter = {
         }
 
         // 消息比剩余空间大 — 分割到多页
-        const pxPerMm = canvas.height / imgHeight;
+        const pxPerMm = this.computePxPerMm(canvas.width, imgWidth);
         let sourceYPx = 0;
 
         while (sourceYPx < canvas.height) {
           const availableMm = pageHeight - margin - footerHeight - currentY;
-          if (availableMm < 10) {
+          if (availableMm < 8) {
             this.addFooter(pdf, pageNum, 0, pageWidth, pageHeight, margin);
             pdf.addPage();
             pageNum++;
@@ -696,44 +804,43 @@ const PDFExporter = {
             continue;
           }
 
-          const sliceHeightPx = Math.min(
-            Math.max(1, Math.floor(availableMm * pxPerMm)),
-            canvas.height - sourceYPx
-          );
-          if (sliceHeightPx <= 0) break;
-
-          const sliceCanvas = document.createElement('canvas');
-          sliceCanvas.width = canvas.width;
-          sliceCanvas.height = sliceHeightPx;
-          const sctx = sliceCanvas.getContext('2d');
-          sctx.fillStyle = '#ffffff';
-          sctx.fillRect(0, 0, sliceCanvas.width, sliceCanvas.height);
-          sctx.drawImage(
-            canvas, 0, sourceYPx, canvas.width, sliceHeightPx,
-            0, 0, canvas.width, sliceHeightPx
-          );
-
-          const sliceForPdf = this.trimSliceWhitespace(sliceCanvas, {
-            trimTop: sourceYPx > 0,
-            trimBottom: sourceYPx + sliceHeightPx < canvas.height,
-            thresholdPx: 24,
-            keepPaddingPx: 4
-          });
-          const sliceMmHeight = (sliceForPdf.height * imgWidth) / sliceForPdf.width;
-          pdf.addImage(sliceForPdf.toDataURL('image/png'), 'PNG', margin, currentY, imgWidth, sliceMmHeight);
-          currentY += sliceMmHeight;
-          sourceYPx += sliceHeightPx;
-
-          if (sourceYPx < canvas.height) {
+          const remainingPx = canvas.height - sourceYPx;
+          const sliceHeightPx = this.computeSliceHeightPx(availableMm, pxPerMm, remainingPx);
+          if (sliceHeightPx <= 0) {
             this.addFooter(pdf, pageNum, 0, pageWidth, pageHeight, margin);
             pdf.addPage();
             pageNum++;
             currentY = margin + headerHeight;
             this.addHeader(pdf, conversation.title, pageNum, pageWidth, margin);
+            continue;
+          }
+
+          const sliceCanvas = this.createSliceCanvas(canvas, sourceYPx, sliceHeightPx);
+          const sliceForPdf = this.maybeTrimSlice(sliceCanvas, {
+            trimTop: sourceYPx > 0,
+            trimBottom: sourceYPx + sliceHeightPx < canvas.height,
+            thresholdPx: 24,
+            keepPaddingPx: 4
+          });
+          const sliceMmHeight = sliceForPdf.height / pxPerMm;
+          pdf.addImage(sliceForPdf.toDataURL('image/png'), 'PNG', margin, currentY, imgWidth, sliceMmHeight);
+          currentY += sliceMmHeight;
+          sourceYPx += sliceHeightPx;
+
+          if (sourceYPx < canvas.height) {
+            const remainingMm = pageHeight - margin - footerHeight - currentY;
+            if (remainingMm < 8) {
+              this.addFooter(pdf, pageNum, 0, pageWidth, pageHeight, margin);
+              pdf.addPage();
+              pageNum++;
+              currentY = margin + headerHeight;
+              this.addHeader(pdf, conversation.title, pageNum, pageWidth, margin);
+            }
           }
         }
 
         currentY += 2;
+        onProgress(messageIndex + 1, conversation.messages.length, { stage: 'segment' });
       }
 
       this.addFooter(pdf, pageNum, pageNum, pageWidth, pageHeight, margin);
@@ -766,24 +873,18 @@ const PDFExporter = {
    * @param {number} widthPx - 容器宽度（像素）
    * @returns {Promise<HTMLCanvasElement>}
    */
-  async renderBatch(messages, widthPx) {
+  async renderBatch(messages, widthPx, startIndex = 0) {
     const container = document.createElement('div');
     container.style.cssText = `position:absolute;left:-9999px;top:0;width:${widthPx}px;background:white;font-family:-apple-system,BlinkMacSystemFont,'Microsoft YaHei','Segoe UI',sans-serif;padding:10px;box-sizing:border-box;font-size:14px;line-height:1.6;`;
 
-    for (const msg of messages) {
-      const isUser = msg.role === 'user';
-      const msgDiv = document.createElement('div');
-      msgDiv.style.cssText = `padding:12px;border-radius:8px;background:${isUser ? '#f0fdf4' : '#f8fafc'};border-left:4px solid ${isUser ? '#10a37f' : '#6366f1'};margin:8px 0;`;
-      msgDiv.innerHTML = `<div style="font-weight:600;color:${isUser ? '#10a37f' : '#6366f1'};margin-bottom:8px;font-size:14px;">${isUser ? '👤 用户' : '🤖 ChatGPT'}</div><div style="color:#374151;font-size:13px;line-height:1.7;word-wrap:break-word;">${this.formatContent(msg.content)}</div>`;
-      container.appendChild(msgDiv);
+    for (let i = 0; i < messages.length; i++) {
+      container.insertAdjacentHTML('beforeend', this.buildVisualMessageHtml(messages[i], startIndex + i));
     }
 
     document.body.appendChild(container);
     await new Promise(r => setTimeout(r, 30));
 
-    const canvas = await html2canvas(container, {
-      scale: 2, useCORS: true, logging: false, backgroundColor: '#ffffff'
-    });
+    const canvas = await this.renderElementToCanvas(container);
 
     document.body.removeChild(container);
     if (this.isCanvasMostlyBlack(canvas)) {
@@ -805,7 +906,6 @@ const PDFExporter = {
     const pageWidth = 210, pageHeight = 297, margin = 15;
     const headerHeight = 12, footerHeight = 12;
     const contentWidth = pageWidth - margin * 2;
-    const contentHeight = pageHeight - margin * 2 - headerHeight - footerHeight;
 
     let currentY = margin + headerHeight;
     let pageNum = 1;
@@ -838,12 +938,12 @@ const PDFExporter = {
 
       // canvas 比剩余空间大 — 需要分割渲染到多页
       // 像素/毫米 比率
-      const pxPerMm = canvas.height / imgHeight;
+      const pxPerMm = this.computePxPerMm(canvas.width, imgWidth);
       let sourceYPx = 0; // 当前在 canvas 中的像素偏移
 
       while (sourceYPx < canvas.height) {
         const availableMm = pageHeight - margin - footerHeight - currentY;
-        if (availableMm < 10) {
+        if (availableMm < 8) {
           // 剩余空间太小，直接换页
           this.addFooter(pdf, pageNum, 0, pageWidth, pageHeight, margin);
           pdf.addPage();
@@ -853,43 +953,39 @@ const PDFExporter = {
           continue;
         }
 
-        const sliceHeightPx = Math.min(
-          Math.max(1, Math.floor(availableMm * pxPerMm)),
-          canvas.height - sourceYPx
-        );
-        if (sliceHeightPx <= 0) break;
+        const remainingPx = canvas.height - sourceYPx;
+        const sliceHeightPx = this.computeSliceHeightPx(availableMm, pxPerMm, remainingPx);
+        if (sliceHeightPx <= 0) {
+          this.addFooter(pdf, pageNum, 0, pageWidth, pageHeight, margin);
+          pdf.addPage();
+          pageNum++;
+          currentY = margin + headerHeight;
+          this.addHeader(pdf, title, pageNum, pageWidth, margin);
+          continue;
+        }
 
-        // 创建切片 canvas
-        const sliceCanvas = document.createElement('canvas');
-        sliceCanvas.width = canvas.width;
-        sliceCanvas.height = sliceHeightPx;
-        const ctx = sliceCanvas.getContext('2d');
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, sliceCanvas.width, sliceCanvas.height);
-        ctx.drawImage(
-          canvas,
-          0, sourceYPx, canvas.width, sliceHeightPx,
-          0, 0, canvas.width, sliceHeightPx
-        );
-
-        const sliceForPdf = this.trimSliceWhitespace(sliceCanvas, {
+        const sliceCanvas = this.createSliceCanvas(canvas, sourceYPx, sliceHeightPx);
+        const sliceForPdf = this.maybeTrimSlice(sliceCanvas, {
           trimTop: sourceYPx > 0,
           trimBottom: sourceYPx + sliceHeightPx < canvas.height,
           thresholdPx: 24,
           keepPaddingPx: 4
         });
-        const sliceMmHeight = (sliceForPdf.height * imgWidth) / sliceForPdf.width;
+        const sliceMmHeight = sliceForPdf.height / pxPerMm;
         pdf.addImage(sliceForPdf.toDataURL('image/png'), 'PNG', margin, currentY, imgWidth, sliceMmHeight);
         currentY += sliceMmHeight;
         sourceYPx += sliceHeightPx;
 
         // 如果还有剩余内容，换页继续
         if (sourceYPx < canvas.height) {
-          this.addFooter(pdf, pageNum, 0, pageWidth, pageHeight, margin);
-          pdf.addPage();
-          pageNum++;
-          currentY = margin + headerHeight;
-          this.addHeader(pdf, title, pageNum, pageWidth, margin);
+          const remainingMm = pageHeight - margin - footerHeight - currentY;
+          if (remainingMm < 8) {
+            this.addFooter(pdf, pageNum, 0, pageWidth, pageHeight, margin);
+            pdf.addPage();
+            pageNum++;
+            currentY = margin + headerHeight;
+            this.addHeader(pdf, title, pageNum, pageWidth, margin);
+          }
         }
       }
 
@@ -928,14 +1024,14 @@ const PDFExporter = {
       const batchMessages = messages.slice(batch.start, batch.end);
 
       try {
-        const canvas = await this.renderBatch(batchMessages, widthPx);
+        const canvas = await this.renderBatch(batchMessages, widthPx, batch.start);
         canvases.push(canvas);
       } catch (err) {
         console.warn(`[PDF] 批次 ${i + 1}/${batches.length} 渲染失败，跳过:`, err.message);
         canvases.push(null); // placeholder for skipped batch
       }
 
-      onProgress(batch.end, messages.length);
+      onProgress(batch.end, messages.length, { stage: 'stream' });
 
       // 让出主线程，避免阻塞 UI
       await new Promise(r => setTimeout(r, 0));
@@ -1182,12 +1278,7 @@ const PDFExporter = {
       host.appendChild(clone);
       document.body.appendChild(host);
       await new Promise(resolve => setTimeout(resolve, 30));
-      const canvas = await html2canvas(host, {
-        scale: 2,
-        useCORS: true,
-        logging: false,
-        backgroundColor: '#ffffff'
-      });
+      const canvas = await this.renderElementToCanvas(host);
       document.body.removeChild(host);
 
       const imgWidth = ctx.contentWidth;
@@ -1347,7 +1438,7 @@ const PDFExporter = {
 
     if (conversation.messages.length > 15) {
       try {
-        const result = await this.exportSegmented();
+        const result = await this.exportSegmented({ onProgress });
         if (result) return result;
       } catch (e) {
         console.warn('[PDF] 分段渲染失败，回退到流式模式:', e.message);
@@ -1371,15 +1462,12 @@ const PDFExporter = {
       document.body.appendChild(container);
       await new Promise(resolve => setTimeout(resolve, 100));
 
-      const canvas = await html2canvas(container, {
-        scale: 2, useCORS: true, logging: false, backgroundColor: '#ffffff',
-        width: container.offsetWidth, height: container.offsetHeight
-      });
+      const canvas = await this.renderElementToCanvas(container);
       document.body.removeChild(container);
 
       if (this.isCanvasMostlyBlack(canvas)) {
         console.warn('[PDF] visual 整体 canvas 异常偏黑，自动回退分段模式');
-        return await this.exportSegmented();
+        return await this.exportSegmented({ onProgress });
       }
 
       const imgWidth = contentWidth;
@@ -1388,7 +1476,7 @@ const PDFExporter = {
       const pageHeightPx = Math.max(1, Math.floor(contentHeight * pxPerMm));
 
       if (this.detectPageGaps(canvas, pageHeightPx)) {
-        return await this.exportSegmented();
+        return await this.exportSegmented({ onProgress });
       }
 
       const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
@@ -1401,15 +1489,8 @@ const PDFExporter = {
 
         const sourceY = slices[page].sourceY;
         const sourceHeight = slices[page].sourceHeight;
-        const pageCanvas = document.createElement('canvas');
-        pageCanvas.width = canvas.width;
-        pageCanvas.height = sourceHeight;
-        const pctx = pageCanvas.getContext('2d');
-        pctx.fillStyle = '#ffffff';
-        pctx.fillRect(0, 0, pageCanvas.width, pageCanvas.height);
-        pctx.drawImage(canvas, 0, sourceY, canvas.width, sourceHeight, 0, 0, canvas.width, sourceHeight);
-
-        const sliceForPdf = this.trimSliceWhitespace(pageCanvas, {
+        const pageCanvas = this.createSliceCanvas(canvas, sourceY, sourceHeight);
+        const sliceForPdf = this.maybeTrimSlice(pageCanvas, {
           trimTop: page > 0,
           trimBottom: page < totalPages - 1,
           thresholdPx: 24,
@@ -1418,13 +1499,14 @@ const PDFExporter = {
         const pageImgHeight = (sliceForPdf.height * imgWidth) / sliceForPdf.width;
         pdf.addImage(sliceForPdf.toDataURL('image/png'), 'PNG', margin, margin + headerHeight, imgWidth, pageImgHeight);
         this.addFooter(pdf, page + 1, totalPages, pageWidth, pageHeight, margin);
+        onProgress(page + 1, totalPages, { stage: 'visual-page' });
       }
 
       return pdf.output('blob');
     } catch (error) {
       console.error('[PDF] 整体模式失败，尝试流式:', error);
       try {
-        return await this.exportStreamed();
+        return await this.exportStreamed({ onProgress });
       } catch (e) {
         console.error('[PDF] 流式也失败:', e);
         return null;

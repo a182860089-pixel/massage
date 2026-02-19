@@ -34,6 +34,51 @@
 
   const AccessManager = window.ChatGPTSaver.AccessManager;
 
+  const UI_ICON_SVGS = Object.freeze({
+    chart: '<svg viewBox="0 0 24 24"><path d="M4 19h16"></path><path d="M7 16v-5"></path><path d="M12 16V8"></path><path d="M17 16v-3"></path></svg>',
+    save: '<svg viewBox="0 0 24 24"><path d="M5 4h11l3 3v13H5z"></path><path d="M9 4v6h6V4"></path><path d="M9 16h6"></path></svg>',
+    refresh: '<svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-13.66-5.66"></path><path d="M4 4v5h5"></path><path d="M4 13a8 8 0 0 0 13.66 5.66"></path><path d="M20 20v-5h-5"></path></svg>',
+    compass: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"></circle><path d="M14.8 9.2l-1.6 5.6-5.6 1.6 1.6-5.6z"></path></svg>',
+    template: '<svg viewBox="0 0 24 24"><rect x="5" y="3.5" width="14" height="17" rx="2"></rect><path d="M8.5 8.5h7"></path><path d="M8.5 12h7"></path><path d="M8.5 15.5h4.5"></path></svg>',
+    file: '<svg viewBox="0 0 24 24"><path d="M7 3.5h7l4 4V20H7z"></path><path d="M14 3.5V8h4"></path><path d="M9 12h6"></path><path d="M9 15h6"></path></svg>',
+    markdown: '<svg viewBox="0 0 24 24"><path d="M4 6.5h16v11H4z"></path><path d="M7.5 13v-3l2 2 2-2v3"></path><path d="M14.5 10h2l-1 1.5 1 1.5h-2"></path></svg>',
+    pdf: '<svg viewBox="0 0 24 24"><path d="M7 3.5h7l4 4V20H7z"></path><path d="M14 3.5V8h4"></path><path d="M9 14h6"></path><path d="M9 17h4.5"></path></svg>',
+    json: '<svg viewBox="0 0 24 24"><path d="M9 5.5c-1.7 0-2.5 1-2.5 2.5v2c0 1-.4 1.8-1.5 2 1.1.2 1.5 1 1.5 2v2c0 1.5.8 2.5 2.5 2.5"></path><path d="M15 5.5c1.7 0 2.5 1 2.5 2.5v2c0 1 .4 1.8 1.5 2-1.1.2-1.5 1-1.5 2v2c0 1.5-.8 2.5-2.5 2.5"></path></svg>',
+    scissors: '<svg viewBox="0 0 24 24"><circle cx="6.5" cy="7.5" r="2.5"></circle><circle cx="6.5" cy="16.5" r="2.5"></circle><path d="M20 5L8.5 13"></path><path d="M20 19L8.5 11"></path></svg>',
+    folder: '<svg viewBox="0 0 24 24"><path d="M3.5 7.5h6l2 2h9v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"></path><path d="M3.5 7.5v-1a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2"></path></svg>',
+    folderOpen: '<svg viewBox="0 0 24 24"><path d="M3.5 9.5h17l-2 8a2 2 0 0 1-2 1.5h-11a2 2 0 0 1-2-2z"></path><path d="M3.5 9.5v-3a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v1"></path></svg>',
+    search: '<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"></circle><path d="M20 20l-4.2-4.2"></path></svg>',
+    globe: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"></circle><path d="M4 12h16"></path><path d="M12 4a12 12 0 0 1 0 16"></path><path d="M12 4a12 12 0 0 0 0 16"></path></svg>',
+    star: '<svg viewBox="0 0 24 24"><path d="M12 4.5l2.4 4.9 5.4.8-3.9 3.8.9 5.4L12 17l-4.8 2.5.9-5.4-3.9-3.8 5.4-.8z"></path></svg>',
+    starFilled: '<svg viewBox="0 0 24 24"><path d="M12 4.5l2.4 4.9 5.4.8-3.9 3.8.9 5.4L12 17l-4.8 2.5.9-5.4-3.9-3.8 5.4-.8z" fill="currentColor" stroke="none"></path></svg>',
+    plus: '<svg viewBox="0 0 24 24"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>',
+    checkSquare: '<svg viewBox="0 0 24 24"><rect x="4.5" y="4.5" width="15" height="15" rx="2.5"></rect><path d="M8.5 12.3l2.3 2.3 4.7-4.7"></path></svg>',
+    square: '<svg viewBox="0 0 24 24"><rect x="4.5" y="4.5" width="15" height="15" rx="2.5"></rect></svg>',
+    xCircle: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"></circle><path d="M9.5 9.5l5 5"></path><path d="M14.5 9.5l-5 5"></path></svg>',
+    clock: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"></circle><path d="M12 8v4.5l3 1.5"></path></svg>',
+    fileStack: '<svg viewBox="0 0 24 24"><path d="M7 4h9l3 3v11H7z"></path><path d="M11 4v4h5"></path><path d="M5 8v11h10"></path></svg>',
+    paperclip: '<svg viewBox="0 0 24 24"><path d="M9 12.5l5.8-5.8a3 3 0 0 1 4.2 4.2l-7.4 7.4a5 5 0 1 1-7.1-7.1l7.4-7.4"></path></svg>',
+    user: '<svg viewBox="0 0 24 24"><circle cx="12" cy="8.2" r="3.2"></circle><path d="M5.5 19a6.5 6.5 0 0 1 13 0"></path></svg>',
+    bot: '<svg viewBox="0 0 24 24"><rect x="6" y="8" width="12" height="9" rx="2"></rect><path d="M12 5v3"></path><circle cx="10" cy="12" r="1"></circle><circle cx="14" cy="12" r="1"></circle><path d="M9 15h6"></path></svg>',
+    pin: '<svg viewBox="0 0 24 24"><path d="M8 4.5l8 8"></path><path d="M9.5 10.5 5 15l4 1 1 4 4.5-4.5"></path><path d="M15 4.5 19.5 9"></path></svg>',
+    puzzle: '<svg viewBox="0 0 24 24"><path d="M8 6h4a2 2 0 1 1 4 0h2v4a2 2 0 1 1 0 4v4h-4a2 2 0 1 1-4 0H8v-4a2 2 0 1 1 0-4z"></path></svg>',
+    edit: '<svg viewBox="0 0 24 24"><path d="M4 20l4.2-.9L18 9.3 14.7 6 4.9 15.8z"></path><path d="M13.8 6.9 16.9 3.8 20.2 7.1 17.1 10.2"></path></svg>',
+    trash: '<svg viewBox="0 0 24 24"><path d="M4.5 7.5h15"></path><path d="M9 7.5v-2h6v2"></path><path d="M7.5 7.5l1 11h7l1-11"></path><path d="M10 11v5"></path><path d="M14 11v5"></path></svg>'
+  });
+
+  function uiIcon(name, className = '') {
+    const svg = UI_ICON_SVGS[name] || UI_ICON_SVGS.file;
+    return `<span class="saver-ui-icon${className ? ` ${className}` : ''}" aria-hidden="true">${svg}</span>`;
+  }
+
+  function iconLabel(iconName, text, className = '') {
+    return `<span class="saver-inline-label${className ? ` ${className}` : ''}">${uiIcon(iconName, 'sm')}<span>${text}</span></span>`;
+  }
+
+  function toggleLabel(enabled, text) {
+    return iconLabel(enabled ? 'checkSquare' : 'square', text);
+  }
+
   // ==================== 卡密验证模块 ====================
   const CardKeyManager = {
     verified: false,
@@ -918,15 +963,27 @@
         .saver-panel-header h3 { margin: 0; font-size: 16px; font-weight: 600; }
         .saver-panel-header p { margin: 4px 0 0; font-size: 12px; opacity: 0.9; }
         .saver-panel-content { padding: 16px; overflow-y: auto; flex: 1; }
+        .saver-ui-icon { width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; color: currentColor; }
+        .saver-ui-icon svg { width: 100%; height: 100%; display: block; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+        .saver-ui-icon.sm { width: 14px; height: 14px; }
+        .saver-ui-icon.xs { width: 12px; height: 12px; }
+        .saver-ui-icon.lg { width: 18px; height: 18px; }
+        .saver-inline-label { display: inline-flex; align-items: center; gap: 6px; }
+        .saver-search-wrap { position: relative; margin-bottom: 8px; }
+        .saver-search-wrap > .saver-ui-icon { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--saver-sub-text); pointer-events: none; }
+        .saver-search-input { padding-left: 30px !important; margin-bottom: 0 !important; }
         .saver-format-group { display: flex; gap: 8px; margin-bottom: 16px; }
-        .saver-format-btn { flex: 1; padding: 10px; border: 2px solid var(--saver-border); border-radius: 8px; background: var(--saver-format-bg); cursor: pointer; text-align: center; transition: all 0.2s; }
+        .saver-format-btn { flex: 1; padding: 10px; border: 2px solid var(--saver-border); border-radius: 8px; background: var(--saver-format-bg); cursor: pointer; text-align: center; transition: all 0.2s; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }
         .saver-format-btn.active { border-color: var(--saver-format-active-border); background: var(--saver-format-active-bg); }
         .saver-format-btn.disabled { opacity: 0.45; cursor: not-allowed; pointer-events: none; }
-        .saver-format-btn span { display: block; font-size: 12px; color: var(--saver-sub-text); margin-top: 4px; }
+        .saver-format-btn span { display: block; font-size: 12px; color: var(--saver-sub-text); margin-top: 0; }
+        .saver-format-btn .saver-ui-icon { color: var(--saver-sub-text); }
+        .saver-format-btn.active .saver-ui-icon { color: var(--saver-active-color); }
         .saver-format-quota { display: block; font-size: 10px; margin-top: 3px; color: #ef4444; }
         .saver-action-btn { width: 100%; padding: 12px; border: none; border-radius: 8px; background: var(--saver-primary-btn-bg); color: var(--saver-primary-btn-text); font-size: 14px; font-weight: 600; cursor: pointer; margin-bottom: 8px; transition: opacity 0.2s; }
         .saver-action-btn:hover { opacity: 0.9; }
         .saver-action-btn.secondary { background: var(--saver-sec-btn-bg); color: var(--saver-sec-btn-text); }
+        .saver-action-btn .saver-inline-label { width: 100%; justify-content: center; }
         .saver-status { font-size: 12px; color: var(--saver-sub-text); text-align: center; padding-top: 8px; border-top: 1px solid var(--saver-border); }
         .saver-status .active { color: var(--saver-active-color); }
         .saver-divider { height: 1px; background: var(--saver-border); margin: 12px 0; }
@@ -944,7 +1001,10 @@
         .saver-log-item-inline:last-child { border-bottom: none; }
         .saver-log-time-inline { color: #9ca3af; margin-right: 6px; }
         .saver-tab-bar { display: flex; border-bottom: 2px solid var(--saver-border); flex-shrink: 0; }
-        .saver-tab { flex: 1; padding: 10px; text-align: center; font-size: 13px; font-weight: 600; cursor: pointer; color: var(--saver-sub-text); border-bottom: 2px solid transparent; margin-bottom: -2px; transition: all 0.2s; background: none; border-top: none; border-left: none; border-right: none; }
+        .saver-tab { flex: 1; padding: 10px 8px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; text-align: center; font-size: 13px; font-weight: 600; cursor: pointer; color: var(--saver-sub-text); border-bottom: 2px solid transparent; margin-bottom: -2px; transition: all 0.2s; background: none; border-top: none; border-left: none; border-right: none; line-height: 1.1; }
+        .saver-tab-icon { width: 14px; height: 14px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+        .saver-tab-icon svg { width: 14px; height: 14px; display: block; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+        .saver-tab-label { white-space: nowrap; }
         .saver-tab.active { color: #10a37f; border-bottom-color: #10a37f; }
         .saver-tab:hover:not(.active) { color: var(--saver-text); background: var(--saver-format-active-bg); }
         .saver-tab-content { display: none; flex: 1; overflow-y: auto; }
@@ -961,11 +1021,20 @@
         .saver-context-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--saver-border); border-radius: 8px; margin-bottom: 4px; font-size: 12px; cursor: grab; transition: all 0.2s; background: var(--saver-format-bg); user-select: none; }
         .saver-context-item:hover { border-color: #10a37f; background: var(--saver-format-active-bg); }
         .saver-context-item:active { opacity: 0.7; transform: scale(0.98); }
-        .saver-context-item .ctx-icon { font-size: 18px; flex-shrink: 0; }
+        .saver-context-item .ctx-icon { width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; color: var(--saver-sub-text); flex-shrink: 0; }
+        .saver-context-item .ctx-icon.active { color: var(--saver-active-color); }
+        .saver-context-item .ctx-icon svg { width: 16px; height: 16px; display: block; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
         .saver-context-item .ctx-info { flex: 1; overflow: hidden; }
         .saver-context-item .ctx-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--saver-text); font-weight: 500; }
         .saver-context-item .ctx-meta { font-size: 10px; color: var(--saver-sub-text); margin-top: 2px; }
         .saver-context-item .ctx-drag-hint { font-size: 10px; color: var(--saver-sub-text); opacity: 0.5; flex-shrink: 0; }
+        .saver-nav-fav-btn { background: none; border: none; cursor: pointer; color: var(--saver-sub-text); padding: 2px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; line-height: 1; }
+        .saver-nav-fav-btn:hover { color: #f59e0b; background: var(--saver-format-active-bg); }
+        .saver-nav-fav-btn.active { color: #f59e0b; }
+        .saver-icon-btn { background: none; border: none; cursor: pointer; color: var(--saver-sub-text); width: 24px; height: 24px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; padding: 0; }
+        .saver-icon-btn:hover { background: var(--saver-format-active-bg); color: var(--saver-text); }
+        .saver-icon-btn.danger { color: #ef4444; }
+        .saver-icon-btn.danger:hover { background: rgba(239,68,68,0.12); color: #dc2626; }
         .saver-context-status { font-size: 12px; color: var(--saver-sub-text); text-align: center; padding: 16px 12px; line-height: 1.6; }
         .saver-cardkey-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 100000; }
         .saver-cardkey-dialog { background: var(--saver-bg, #fff); border-radius: 16px; padding: 32px 24px; width: 340px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; text-align: center; color: var(--saver-text, #333); }
@@ -1100,14 +1169,34 @@
           <button id="saver-theme-toggle" style="position: absolute; top: 12px; right: 12px; background: none; border: none; cursor: pointer; font-size: 18px; padding: 0; line-height: 1;">🌞</button>
         </div>
         <div class="saver-tab-bar">
-          <button class="saver-tab active" data-tab="save">💾 保存</button>
-          <button class="saver-tab" data-tab="context">🔄 延续</button>
-          <button class="saver-tab" data-tab="nav">🧭 导航</button>
-          <button class="saver-tab" data-tab="template">📋 模板</button>
+          <button class="saver-tab active" data-tab="save">
+            <span class="saver-tab-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M5 4h11l3 3v13H5z"></path><path d="M9 4v6h6V4"></path><path d="M9 16h6"></path></svg>
+            </span>
+            <span class="saver-tab-label">保存</span>
+          </button>
+          <button class="saver-tab" data-tab="context">
+            <span class="saver-tab-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-13.66-5.66"></path><path d="M4 4v5h5"></path><path d="M4 13a8 8 0 0 0 13.66 5.66"></path><path d="M20 20v-5h-5"></path></svg>
+            </span>
+            <span class="saver-tab-label">延续</span>
+          </button>
+          <button class="saver-tab" data-tab="nav">
+            <span class="saver-tab-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"></circle><path d="M14.8 9.2l-1.6 5.6-5.6 1.6 1.6-5.6z"></path></svg>
+            </span>
+            <span class="saver-tab-label">导航</span>
+          </button>
+          <button class="saver-tab" data-tab="template">
+            <span class="saver-tab-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><rect x="5" y="3.5" width="14" height="17" rx="2"></rect><path d="M8.5 8.5h7"></path><path d="M8.5 12h7"></path><path d="M8.5 15.5h4.5"></path></svg>
+            </span>
+            <span class="saver-tab-label">模板</span>
+          </button>
         </div>
         <div class="saver-tab-content active" id="saver-tab-save">
           <div class="saver-panel-content">
-            <div style="font-size: 12px; color: var(--saver-sub-text); margin-bottom: 8px; font-weight: 600;">📊 模型用量 / 风控 <span id="saver-usage-workspace" style="font-weight: 400; opacity: 0.8;"></span></div>
+            <div style="font-size: 12px; color: var(--saver-sub-text); margin-bottom: 8px; font-weight: 600;">${iconLabel('chart', '模型用量 / 风控')} <span id="saver-usage-workspace" style="font-weight: 400; opacity: 0.8;"></span></div>
             <div style="display:flex;gap:6px;margin-bottom:8px;">
               <select id="saver-account-type" style="flex:1;padding:6px 8px;border:1px solid var(--saver-border);border-radius:8px;background:var(--saver-format-bg);color:var(--saver-text);font-size:11px;">
                 <option value="">账号类型：自动识别</option>
@@ -1123,10 +1212,10 @@
               <div class="saver-usage-item"><div class="saver-usage-model">加载中...</div></div>
             </div>
             <div class="saver-format-group">
-              <div class="saver-format-btn ${config.formats.html ? 'active' : ''}" data-format="html">📄<span>HTML</span></div>
-              <div class="saver-format-btn ${config.formats.md ? 'active' : ''}" data-format="md">📝<span>Markdown</span><small class="saver-format-quota" data-quota-label="md" style="display:none;"></small></div>
-              <div class="saver-format-btn ${config.formats.pdf ? 'active' : ''}" data-format="pdf">📕<span>PDF</span><small class="saver-format-quota" data-quota-label="pdf" style="display:none;"></small></div>
-              <div class="saver-format-btn ${config.formats.json ? 'active' : ''}" data-format="json">📦<span>JSON</span></div>
+              <div class="saver-format-btn ${config.formats.html ? 'active' : ''}" data-format="html">${uiIcon('file', 'lg')}<span>HTML</span></div>
+              <div class="saver-format-btn ${config.formats.md ? 'active' : ''}" data-format="md">${uiIcon('markdown', 'lg')}<span>Markdown</span><small class="saver-format-quota" data-quota-label="md" style="display:none;"></small></div>
+              <div class="saver-format-btn ${config.formats.pdf ? 'active' : ''}" data-format="pdf">${uiIcon('pdf', 'lg')}<span>PDF</span><small class="saver-format-quota" data-quota-label="pdf" style="display:none;"></small></div>
+              <div class="saver-format-btn ${config.formats.json ? 'active' : ''}" data-format="json">${uiIcon('json', 'lg')}<span>JSON</span></div>
             </div>
             <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;">
               <span style="font-size:12px;color:var(--saver-sub-text);">PDF 导出模式</span>
@@ -1135,25 +1224,25 @@
                 <option value="visual">视觉还原（画布截图）</option>
               </select>
             </div>
-            <button class="saver-action-btn" id="saver-export-btn">💾 立即导出当前对话</button>
-            <button class="saver-action-btn secondary" id="saver-selection-btn">✂️ 选择导出</button>
+            <button class="saver-action-btn" id="saver-export-btn">${iconLabel('save', '立即导出当前对话')}</button>
+            <button class="saver-action-btn secondary" id="saver-selection-btn">${iconLabel('scissors', '选择导出')}</button>
             <div id="saver-selection-bar" style="display:none;margin-bottom:8px;">
               <div style="display:flex;gap:8px;">
                 <button class="saver-action-btn" id="saver-export-selected" disabled style="flex:1;">导出选中 (0)</button>
                 <button class="saver-action-btn secondary" id="saver-exit-selection" style="flex:1;">退出选择</button>
               </div>
             </div>
-            <button class="saver-action-btn secondary" id="saver-select-folder">📁 选择保存文件夹</button>
+            <button class="saver-action-btn secondary" id="saver-select-folder">${iconLabel('folder', '选择保存文件夹')}</button>
             <div class="saver-divider"></div>
             <div id="saver-folder-status" style="margin-bottom: 8px; font-size: 12px; color: var(--saver-sub-text);">
               保存位置: <span id="saver-folder-name" style="color: var(--saver-active-color);">未设置</span>
             </div>
             <div style="display: flex; gap: 8px; margin-bottom: 8px;">
               <button class="saver-action-btn secondary" id="saver-auto-toggle" style="font-size: 12px; padding: 8px; margin-bottom: 0; flex: 1;">
-                ${config.autoSave ? '✅ 自动保存' : '⚪ 自动保存'}
+                ${toggleLabel(config.autoSave, '自动保存')}
               </button>
               <button class="saver-action-btn secondary" id="saver-log-toggle" style="font-size: 12px; padding: 8px; margin-bottom: 0; flex: 1;">
-                ${config.showLogPanel ? '✅ 显示日志' : '⚪ 显示日志'}
+                ${toggleLabel(config.showLogPanel, '显示日志')}
               </button>
             </div>
             <div class="saver-status" id="saver-observer-status">
@@ -1162,7 +1251,7 @@
             </div>
             <div class="saver-log-area" id="saver-log-area">
               <div class="saver-log-header-inline loading" id="saver-log-header">
-                <span id="saver-log-icon">⏳</span>
+                <span id="saver-log-icon">${uiIcon('clock', 'sm')}</span>
                 <span id="saver-log-title">正在导出...</span>
                 <span class="saver-log-toggle-arrow" id="saver-log-arrow">▶</span>
               </div>
@@ -1172,13 +1261,16 @@
         </div>
         <div class="saver-tab-content" id="saver-tab-context">
           <div class="saver-panel-content">
-            <div style="font-size: 12px; color: var(--saver-sub-text); margin-bottom: 4px; font-weight: 600;">📂 已保存的上下文 <span id="saver-context-quota" style="font-weight:400;opacity:0.85;"></span></div>
+            <div style="font-size: 12px; color: var(--saver-sub-text); margin-bottom: 4px; font-weight: 600;">${iconLabel('folderOpen', '已保存的上下文')} <span id="saver-context-quota" style="font-weight:400;opacity:0.85;"></span></div>
             <div style="font-size: 11px; color: var(--saver-sub-text); opacity: 0.7; margin-bottom: 10px;">拖拽文件到 ChatGPT 对话框即可导入</div>
             <div style="display:flex;gap:6px;margin-bottom:8px;">
               <select id="saver-ctx-prompt-select" style="flex:1;padding:7px 8px;border:1px solid var(--saver-border);border-radius:8px;font-size:11px;background:var(--saver-format-bg);color:var(--saver-text);outline:none;cursor:pointer;"></select>
-              <button id="saver-ctx-lang-toggle" style="padding:7px 10px;border:1px solid var(--saver-border);border-radius:8px;font-size:11px;background:var(--saver-format-bg);color:var(--saver-text);cursor:pointer;white-space:nowrap;" title="切换提示词语言">🌐 中文</button>
+              <button id="saver-ctx-lang-toggle" style="padding:7px 10px;border:1px solid var(--saver-border);border-radius:8px;font-size:11px;background:var(--saver-format-bg);color:var(--saver-text);cursor:pointer;white-space:nowrap;" title="切换提示词语言">${iconLabel('globe', '中文')}</button>
             </div>
-            <input type="text" id="saver-context-search" placeholder="🔍 搜索上下文..." style="width:100%;padding:8px 10px;border:1px solid var(--saver-border);border-radius:8px;font-size:12px;outline:none;background:var(--saver-format-bg);color:var(--saver-text);box-sizing:border-box;margin-bottom:8px;" />
+            <div class="saver-search-wrap">
+              ${uiIcon('search', 'sm')}
+              <input type="text" id="saver-context-search" class="saver-search-input" placeholder="搜索上下文..." style="width:100%;padding:8px 10px;border:1px solid var(--saver-border);border-radius:8px;font-size:12px;outline:none;background:var(--saver-format-bg);color:var(--saver-text);box-sizing:border-box;" />
+            </div>
             <div class="saver-context-list" id="saver-context-list">
               <div class="saver-context-status">加载中...</div>
             </div>
@@ -1186,13 +1278,16 @@
         </div>
         <div class="saver-tab-content" id="saver-tab-nav">
           <div class="saver-panel-content">
-            <div style="font-size: 12px; color: var(--saver-sub-text); margin-bottom: 6px; font-weight: 600;">🧭 对话导航 <span id="saver-nav-quota" style="font-weight:400;opacity:0.85;"></span></div>
-            <input type="text" id="saver-nav-search" placeholder="🔍 搜索当前对话消息..." style="width:100%;padding:8px 10px;border:1px solid var(--saver-border);border-radius:8px;font-size:12px;outline:none;background:var(--saver-format-bg);color:var(--saver-text);box-sizing:border-box;margin-bottom:8px;" />
+            <div style="font-size: 12px; color: var(--saver-sub-text); margin-bottom: 6px; font-weight: 600;">${iconLabel('compass', '对话导航')} <span id="saver-nav-quota" style="font-weight:400;opacity:0.85;"></span></div>
+            <div class="saver-search-wrap">
+              ${uiIcon('search', 'sm')}
+              <input type="text" id="saver-nav-search" class="saver-search-input" placeholder="搜索当前对话消息..." style="width:100%;padding:8px 10px;border:1px solid var(--saver-border);border-radius:8px;font-size:12px;outline:none;background:var(--saver-format-bg);color:var(--saver-text);box-sizing:border-box;" />
+            </div>
             <div id="saver-nav-stats" style="font-size:11px;color:var(--saver-sub-text);margin-bottom:8px;">加载中...</div>
             <div id="saver-nav-list" class="saver-context-list">
               <div class="saver-context-status">正在提取对话消息...</div>
             </div>
-            <div style="font-size: 12px; color: var(--saver-sub-text); margin: 10px 0 6px; font-weight: 600;">⭐ 收藏（按对话分组）</div>
+            <div style="font-size: 12px; color: var(--saver-sub-text); margin: 10px 0 6px; font-weight: 600;">${iconLabel('star', '收藏（按对话分组）')}</div>
             <div id="saver-nav-favorites" class="saver-context-list">
               <div class="saver-context-status">暂无收藏</div>
             </div>
@@ -1201,8 +1296,8 @@
         <div class="saver-tab-content" id="saver-tab-template">
           <div class="saver-panel-content">
             <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;">
-              <div style="font-size: 12px; color: var(--saver-sub-text); font-weight: 600;">🔄 对话延续模板</div>
-              <button id="saver-ctx-template-add" style="padding:6px 10px;border:1px solid var(--saver-border);border-radius:8px;background:var(--saver-format-bg);color:var(--saver-text);font-size:11px;cursor:pointer;">➕ 新增模板</button>
+              <div style="font-size: 12px; color: var(--saver-sub-text); font-weight: 600;">${iconLabel('refresh', '对话延续模板')}</div>
+              <button id="saver-ctx-template-add" style="padding:6px 10px;border:1px solid var(--saver-border);border-radius:8px;background:var(--saver-format-bg);color:var(--saver-text);font-size:11px;cursor:pointer;">${iconLabel('plus', '新增模板')}</button>
             </div>
             <div id="saver-template-quota" style="font-size:11px;color:var(--saver-sub-text);opacity:0.85;margin-bottom:6px;"></div>
             <div style="font-size:11px;color:var(--saver-sub-text);opacity:0.8;margin-bottom:8px;">内置模板支持编辑与恢复默认，自定义模板支持新增/编辑/删除。</div>
@@ -1371,7 +1466,7 @@
       document.getElementById('saver-auto-toggle').onclick = (e) => {
         config.autoSave = !config.autoSave;
         chrome.storage.local.set({ autoSave: config.autoSave });
-        e.target.textContent = config.autoSave ? '✅ 自动保存' : '⚪ 自动保存';
+        e.currentTarget.innerHTML = toggleLabel(config.autoSave, '自动保存');
         if (config.autoSave) startAutoSave(); else window.ChatGPTSaver.Observer.stop();
         this.updateStatus();
       };
@@ -1380,7 +1475,7 @@
       document.getElementById('saver-log-toggle').onclick = (e) => {
         config.showLogPanel = !config.showLogPanel;
         chrome.storage.local.set({ showLogPanel: config.showLogPanel });
-        e.target.textContent = config.showLogPanel ? '✅ 显示日志' : '⚪ 显示日志';
+        e.currentTarget.innerHTML = toggleLabel(config.showLogPanel, '显示日志');
       };
 
       // Tab 切换
@@ -1674,7 +1769,12 @@
 
     updateFolderStatus(name) {
       const el = document.getElementById('saver-folder-name');
-      if (el) el.textContent = name ? '📂 ' + name : '未设置';
+      if (el) {
+        const safeName = this._escapeHtml(name || '');
+        el.innerHTML = name
+          ? `${uiIcon('folder', 'sm')} <span>${safeName}</span>`
+          : '未设置';
+      }
     },
 
     getPDFExportMode() {
@@ -1710,7 +1810,10 @@
     setLogStatus(type, title) {
       if (!this.logHeader) return;
       this.logHeader.className = 'saver-log-header-inline ' + type;
-      if (this.logIcon) this.logIcon.textContent = type === 'success' ? '✅' : (type === 'error' ? '❌' : '⏳');
+      if (this.logIcon) {
+        const iconName = type === 'success' ? 'checkSquare' : (type === 'error' ? 'xCircle' : 'clock');
+        this.logIcon.innerHTML = uiIcon(iconName, 'sm');
+      }
       if (this.logTitle) this.logTitle.textContent = title;
     },
 
@@ -1801,7 +1904,7 @@
 
       html += `<div class="saver-usage-item">
         <div class="saver-usage-head">
-          <div class="saver-usage-model">💾 当前空间已保存</div>
+          <div class="saver-usage-model">${iconLabel('save', '当前空间已保存')}</div>
           <div class="saver-usage-count" id="saver-ws-saved-count" style="font-size:13px;">0</div>
         </div>
       </div>`;
@@ -1986,13 +2089,14 @@
         const safePreview = this._escapeHtml(preview);
         const isActive = tpl.id === selectedId;
         const rightBtns = tpl.builtin
-          ? `<button class="saver-ctx-tpl-edit" data-id="${tpl.id}" style="background:none;border:none;cursor:pointer;font-size:14px;flex-shrink:0;" title="编辑">✏️</button>`
+          ? `<button class="saver-ctx-tpl-edit saver-icon-btn" data-id="${tpl.id}" title="编辑">${uiIcon('edit', 'sm')}</button>`
           : `<div style="display:flex;gap:4px;align-items:center;">
-              <button class="saver-ctx-tpl-edit" data-id="${tpl.id}" style="background:none;border:none;cursor:pointer;font-size:14px;flex-shrink:0;" title="编辑">✏️</button>
-              <button class="saver-ctx-tpl-del" data-id="${tpl.id}" style="background:none;border:none;cursor:pointer;font-size:14px;flex-shrink:0;color:#ef4444;" title="删除">🗑️</button>
+              <button class="saver-ctx-tpl-edit saver-icon-btn" data-id="${tpl.id}" title="编辑">${uiIcon('edit', 'sm')}</button>
+              <button class="saver-ctx-tpl-del saver-icon-btn danger" data-id="${tpl.id}" title="删除">${uiIcon('trash', 'sm')}</button>
             </div>`;
+        const leftIcon = isActive ? uiIcon('checkSquare', 'sm') : (tpl.builtin ? uiIcon('pin', 'sm') : uiIcon('puzzle', 'sm'));
         return `<div class="saver-context-item" data-ctx-tpl-id="${tpl.id}" style="cursor:pointer;${isActive ? 'border-color:#10a37f;background:var(--saver-format-active-bg);' : ''}">
-          <span class="ctx-icon" style="font-size:14px;">${isActive ? '✅' : (tpl.builtin ? '📌' : '🧩')}</span>
+          <span class="ctx-icon${isActive ? ' active' : ''}" style="font-size:14px;">${leftIcon}</span>
           <div class="ctx-info">
             <div class="ctx-title" style="font-size:12px;">${safeName}</div>
             <div class="ctx-meta">${safePreview}</div>
@@ -2608,7 +2712,7 @@
 
     _updateLangBtn() {
       const btn = document.getElementById('saver-ctx-lang-toggle');
-      if (btn) btn.textContent = this._lang === 'zh' ? '🌐 中文' : '🌐 EN';
+      if (btn) btn.innerHTML = iconLabel('globe', this._lang === 'zh' ? '中文' : 'EN');
     },
 
     _bindEvents() {
@@ -2764,7 +2868,7 @@
         html += `<div class="saver-ws-group" data-ws="${ws}">
           <div class="saver-ws-header expanded">
             <span class="saver-ws-arrow">▶</span>
-            <span>📁 ${ws}</span>
+            <span class="saver-inline-label">${uiIcon('folder', 'sm')}<span>${ws}</span></span>
             <span class="saver-ws-count">${items.length}</span>
           </div>
           <div class="saver-ws-children">`;
@@ -2772,10 +2876,10 @@
           const attCount = f.attachments?.length || 0;
           const ctxCount = f.allContextHandles?.length || 1;
           const metaParts = [];
-          if (ctxCount > 1) metaParts.push(`📄${ctxCount} 个上下文`);
-          if (attCount > 0) metaParts.push(`📎${attCount} 个附件`);
+          if (ctxCount > 1) metaParts.push(`${uiIcon('fileStack', 'xs')}${ctxCount} 个上下文`);
+          if (attCount > 0) metaParts.push(`${uiIcon('paperclip', 'xs')}${attCount} 个附件`);
           html += `<div class="saver-context-item" draggable="true" data-idx="${f._idx}" title="拖拽到 ChatGPT 对话框导入\n${f.workspace}/${f.conversation}${ctxCount > 1 ? '\n含 ' + ctxCount + ' 个上下文文件' : ''}${attCount ? '\n含 ' + attCount + ' 个附件' : ''}">
-            <span class="ctx-icon">${attCount > 0 ? '📎' : '📄'}</span>
+            <span class="ctx-icon">${attCount > 0 ? uiIcon('paperclip', 'sm') : uiIcon('file', 'sm')}</span>
             <div class="ctx-info">
               <div class="ctx-title">${f.conversation}</div>
               <div class="ctx-meta">${metaParts.join(' · ') || ''}</div>
@@ -3109,16 +3213,17 @@
         listEl.innerHTML = '<div class="saver-context-status">没有匹配消息</div>';
       } else {
         listEl.innerHTML = filtered.map(item => {
-          const icon = item.role === 'assistant' ? '🤖' : '👤';
-          const fav = this._isFavorite(item.messageId) ? '⭐' : '☆';
+          const roleIcon = item.role === 'assistant' ? uiIcon('bot', 'sm') : uiIcon('user', 'sm');
+          const isFav = this._isFavorite(item.messageId);
+          const fav = isFav ? uiIcon('starFilled', 'sm') : uiIcon('star', 'sm');
           return `
             <div class="saver-context-item" data-nav-message-id="${item.messageId}" data-nav-index="${item.index}" style="cursor:pointer;">
-              <span class="ctx-icon">${icon}</span>
+              <span class="ctx-icon">${roleIcon}</span>
               <div class="ctx-info">
                 <div class="ctx-title">#${item.index + 1}</div>
                 <div class="ctx-meta">${item.snippet}</div>
               </div>
-              <button class="saver-nav-fav-btn" data-fav-id="${item.messageId}" data-fav-index="${item.index}" style="background:none;border:none;cursor:pointer;font-size:15px;line-height:1;">${fav}</button>
+              <button class="saver-nav-fav-btn${isFav ? ' active' : ''}" data-fav-id="${item.messageId}" data-fav-index="${item.index}" title="收藏 / 取消收藏">${fav}</button>
             </div>
           `;
         }).join('');
@@ -3154,13 +3259,13 @@
             <div class="saver-ws-group" data-conv-id="${convId}">
               <div class="saver-ws-header expanded">
                 <span class="saver-ws-arrow">▶</span>
-                <span>🗂️ ${title}</span>
+                <span class="saver-inline-label">${uiIcon('folderOpen', 'sm')}<span>${title}</span></span>
                 <span class="saver-ws-count">${items.length}</span>
               </div>
               <div class="saver-ws-children">
                 ${items.map(item => `
                   <div class="saver-context-item" data-fav-jump-id="${item.messageId}" data-fav-jump-index="${item.indexHint}" data-fav-conv-id="${item.conversationId}" style="cursor:pointer;">
-                    <span class="ctx-icon">${item.role === 'assistant' ? '🤖' : '👤'}</span>
+                    <span class="ctx-icon">${item.role === 'assistant' ? uiIcon('bot', 'sm') : uiIcon('user', 'sm')}</span>
                     <div class="ctx-info">
                       <div class="ctx-title">#${(item.indexHint || 0) + 1}</div>
                       <div class="ctx-meta">${item.snippet || ''}</div>

@@ -28,7 +28,7 @@
     showLogPanel: true,
     pdfExportMode: 'structured',
     debounceDelay: 2000,
-    currentVersion: '3.1',
+    currentVersion: chrome.runtime?.getManifest?.().version || '3.1',
     cardKeyApiBase: 'https://seat.20050225.xyz'
   };
 
@@ -986,6 +986,69 @@
         .saver-cardkey-info { display: inline-block; font-size: 11px; color: var(--saver-sub-text, #666); background: var(--saver-format-active-bg, #f3f4f6); padding: 4px 10px; border-radius: 12px; margin-left: 8px; cursor: pointer; }
         .saver-cardkey-info:hover { opacity: 0.8; }
         .saver-nav-highlight { outline: 2px solid #10a37f !important; background: rgba(16,163,127,0.1) !important; border-radius: 8px !important; }
+        .saver-about-card { border: 1px solid var(--saver-border); border-radius: 10px; background: var(--saver-format-bg); padding: 12px; margin-bottom: 10px; }
+        .saver-about-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--saver-text); margin-bottom: 6px; }
+        .saver-about-row strong { font-size: 12px; color: var(--saver-active-color); }
+        .saver-about-status { font-size: 11px; color: var(--saver-sub-text); margin: 8px 0; line-height: 1.5; min-height: 16px; }
+        .saver-about-btn-row { display: flex; gap: 8px; }
+        .saver-about-btn { flex: 1; padding: 8px 10px; border: 1px solid var(--saver-border); border-radius: 8px; background: var(--saver-format-bg); color: var(--saver-text); font-size: 12px; cursor: pointer; transition: opacity 0.2s; }
+        .saver-about-btn.primary { border-color: #10a37f; color: #10a37f; }
+        .saver-about-btn:hover { opacity: 0.9; }
+        .saver-about-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+        .saver-about-notice { font-size: 12px; color: var(--saver-text); line-height: 1.7; word-break: break-word; max-height: 46vh; overflow-y: auto; }
+        .saver-about-notice p { margin: 0 0 8px; }
+        .saver-about-notice p:last-child { margin-bottom: 0; }
+        .saver-about-notice h1, .saver-about-notice h2, .saver-about-notice h3, .saver-about-notice h4 {
+          margin: 10px 0 6px;
+          font-size: 13px;
+          color: var(--saver-active-color);
+        }
+        .saver-about-notice ul, .saver-about-notice ol { margin: 6px 0 8px 16px; }
+        .saver-about-notice li { margin-bottom: 4px; }
+        .saver-about-notice blockquote {
+          border-left: 3px solid var(--saver-border);
+          background: var(--saver-format-active-bg);
+          border-radius: 0 8px 8px 0;
+          margin: 8px 0;
+          padding: 6px 10px;
+          color: var(--saver-sub-text);
+        }
+        .saver-about-notice a { color: #10a37f; text-decoration: none; }
+        .saver-about-notice a:hover { text-decoration: underline; }
+        .saver-about-notice code {
+          background: var(--saver-format-active-bg);
+          border: 1px solid var(--saver-border);
+          border-radius: 4px;
+          padding: 1px 4px;
+          font-family: Consolas, Monaco, monospace;
+          font-size: 11px;
+        }
+        .saver-about-notice pre {
+          margin: 8px 0;
+          padding: 8px;
+          background: var(--saver-format-active-bg);
+          border: 1px solid var(--saver-border);
+          border-radius: 8px;
+          overflow-x: auto;
+        }
+        .saver-about-notice pre code {
+          background: transparent;
+          border: none;
+          padding: 0;
+        }
+        .saver-about-notice table {
+          width: 100%;
+          border-collapse: collapse;
+          margin: 8px 0;
+          font-size: 11px;
+        }
+        .saver-about-notice th,
+        .saver-about-notice td {
+          border: 1px solid var(--saver-border);
+          padding: 6px 8px;
+          text-align: left;
+        }
+        .saver-about-notice th { background: var(--saver-format-active-bg); }
         .saver-tpl-editor-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 100000; animation: fadeIn 0.15s ease; }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
         .saver-tpl-editor-dialog { background: var(--saver-bg, #fff); border-radius: 16px; padding: 24px; width: 480px; max-width: 90vw; max-height: 80vh; display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0,0,0,0.3); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: var(--saver-text, #333); }
@@ -1002,6 +1065,367 @@
         .saver-tpl-editor-actions .saver-tpl-cancel:hover { opacity: 0.8; }
         .saver-tpl-editor-actions .saver-tpl-reset { background: none; color: #ef4444; font-weight: 500; padding: 9px 12px; margin-right: auto; }
         .saver-tpl-editor-actions .saver-tpl-reset:hover { opacity: 0.7; }
+
+        /* -------- GPT 风格 UI 重塑 -------- */
+        :root {
+          --saver-bg: #f7f7f8;
+          --saver-text: #111827;
+          --saver-sub-text: #6b7280;
+          --saver-header-bg: #ffffff;
+          --saver-header-text: #111827;
+          --saver-border: #e5e7eb;
+          --saver-sec-btn-bg: #f3f4f6;
+          --saver-sec-btn-text: #374151;
+          --saver-format-bg: #ffffff;
+          --saver-format-active-bg: #ecfdf5;
+          --saver-format-active-border: #10a37f;
+          --saver-primary-btn-bg: #10a37f;
+          --saver-primary-btn-text: #ffffff;
+          --saver-active-color: #10a37f;
+        }
+        :root.saver-dark {
+          --saver-bg: #202123;
+          --saver-text: #ececf1;
+          --saver-sub-text: #a1a1aa;
+          --saver-header-bg: #2a2b32;
+          --saver-header-text: #ececf1;
+          --saver-border: #3f4049;
+          --saver-sec-btn-bg: #2f3139;
+          --saver-sec-btn-text: #e5e7eb;
+          --saver-format-bg: #2a2b32;
+          --saver-format-active-bg: #153d33;
+          --saver-format-active-border: #19b185;
+          --saver-primary-btn-bg: #19b185;
+          --saver-primary-btn-text: #ffffff;
+          --saver-active-color: #22c59a;
+        }
+        #chatgpt-saver-panel {
+          background: var(--saver-bg);
+          border-left: 1px solid var(--saver-border);
+          box-shadow: -12px 0 36px rgba(15, 23, 42, 0.14);
+        }
+        .saver-panel-header {
+          border-bottom: 1px solid var(--saver-border);
+          padding: 14px 14px 12px;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        }
+        .saver-panel-header h3 {
+          font-size: 23px;
+          letter-spacing: 0.2px;
+          margin: 0;
+        }
+        .saver-panel-header p {
+          margin: 0;
+          color: var(--saver-sub-text);
+          font-size: 12px;
+        }
+        .saver-tab-bar { display: none !important; }
+        .saver-header-title-row {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+        }
+        .saver-header-actions {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+        }
+        .saver-header-icon-btn {
+          width: 28px;
+          height: 28px;
+          border-radius: 8px;
+          border: 1px solid var(--saver-border);
+          background: var(--saver-format-bg);
+          color: var(--saver-sub-text);
+          cursor: pointer;
+          line-height: 1;
+          font-size: 14px;
+          padding: 0;
+          transition: all 0.18s ease;
+        }
+        .saver-header-icon-btn:hover {
+          color: var(--saver-text);
+          border-color: #d1d5db;
+          transform: translateY(-1px);
+        }
+        .saver-header-meta-row {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .saver-view-label {
+          font-size: 11px;
+          color: var(--saver-sub-text);
+        }
+        .saver-view-select {
+          flex: 1;
+          border: 1px solid var(--saver-border);
+          border-radius: 10px;
+          padding: 7px 9px;
+          background: var(--saver-format-bg);
+          color: var(--saver-text);
+          font-size: 12px;
+          outline: none;
+        }
+        .saver-view-select:focus {
+          border-color: var(--saver-format-active-border);
+          box-shadow: 0 0 0 2px rgba(16, 163, 127, 0.12);
+        }
+        .saver-header-tools {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 8px;
+        }
+        .saver-tool-btn {
+          border: 1px solid var(--saver-border);
+          border-radius: 10px;
+          background: var(--saver-sec-btn-bg);
+          color: var(--saver-sec-btn-text);
+          font-size: 12px;
+          font-weight: 600;
+          padding: 8px 10px;
+          cursor: pointer;
+          transition: all 0.18s ease;
+        }
+        .saver-tool-btn.primary {
+          background: var(--saver-primary-btn-bg);
+          color: var(--saver-primary-btn-text);
+          border-color: transparent;
+        }
+        .saver-tool-btn.active,
+        .saver-tool-btn:hover {
+          transform: translateY(-1px);
+          box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08);
+        }
+        .saver-panel-content {
+          padding: 12px;
+          background: var(--saver-bg);
+        }
+        .saver-usage-item,
+        .saver-about-card,
+        .saver-context-item,
+        .saver-log-content-inline,
+        .saver-status {
+          background: var(--saver-format-bg);
+          border-radius: 12px;
+        }
+        .saver-format-group {
+          gap: 10px;
+          margin-bottom: 12px;
+        }
+        .saver-format-btn {
+          border-width: 1px;
+          border-radius: 12px;
+          box-shadow: 0 1px 0 rgba(15, 23, 42, 0.03);
+          transition: all 0.18s ease;
+        }
+        .saver-format-btn:hover {
+          transform: translateY(-1px);
+        }
+        .saver-format-btn.active {
+          box-shadow: 0 0 0 2px rgba(16, 163, 127, 0.15) inset;
+        }
+        .saver-selection-bar {
+          margin-bottom: 8px;
+          padding: 8px;
+          border: 1px dashed #b7e4d8;
+          border-radius: 12px;
+          background: rgba(16, 163, 127, 0.06);
+        }
+        .saver-selection-bar .saver-action-btn {
+          margin-bottom: 0;
+          padding: 10px 8px;
+          font-size: 12px;
+          border-radius: 10px;
+        }
+        .saver-status {
+          border: 1px solid var(--saver-border);
+          padding: 9px 10px;
+          margin-top: 2px;
+        }
+        #saver-folder-status {
+          padding: 8px 10px;
+          border: 1px solid var(--saver-border);
+          border-radius: 10px;
+          background: var(--saver-format-bg);
+        }
+
+        .saver-nav-head {
+          margin-bottom: 6px;
+        }
+        .saver-nav-title {
+          font-size: 13px;
+          color: var(--saver-text);
+          font-weight: 700;
+        }
+        #saver-nav-quota {
+          font-weight: 400;
+          opacity: 0.82;
+          color: var(--saver-sub-text);
+        }
+        .saver-nav-desc {
+          margin-top: 3px;
+          font-size: 11px;
+          color: var(--saver-sub-text);
+        }
+        .saver-nav-search-wrap {
+          position: relative;
+          margin-bottom: 8px;
+        }
+        .saver-nav-search-icon {
+          position: absolute;
+          left: 10px;
+          top: 50%;
+          transform: translateY(-50%);
+          font-size: 12px;
+          color: var(--saver-sub-text);
+          pointer-events: none;
+        }
+        .saver-nav-search-input {
+          width: 100%;
+          padding: 9px 10px 9px 30px;
+          border: 1px solid var(--saver-border);
+          border-radius: 10px;
+          font-size: 12px;
+          outline: none;
+          background: var(--saver-format-bg);
+          color: var(--saver-text);
+          box-sizing: border-box;
+        }
+        .saver-nav-search-input:focus {
+          border-color: var(--saver-format-active-border);
+          box-shadow: 0 0 0 2px rgba(16, 163, 127, 0.12);
+        }
+        .saver-nav-stats {
+          font-size: 11px;
+          color: var(--saver-sub-text);
+          margin-bottom: 8px;
+          padding: 0 2px;
+        }
+        .saver-nav-list {
+          background: transparent;
+        }
+        .saver-nav-item {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 8px;
+          padding: 10px;
+          border: 1px solid var(--saver-border);
+          border-radius: 12px;
+          margin-bottom: 7px;
+          cursor: pointer;
+          background: var(--saver-format-bg);
+          transition: all 0.18s ease;
+        }
+        .saver-nav-item:hover {
+          border-color: rgba(16, 163, 127, 0.45);
+          transform: translateY(-1px);
+          box-shadow: 0 6px 18px rgba(15, 23, 42, 0.08);
+        }
+        .saver-nav-item.compact {
+          padding: 8px 9px;
+          border-radius: 10px;
+        }
+        .saver-nav-main {
+          min-width: 0;
+          display: flex;
+          align-items: flex-start;
+          gap: 8px;
+          flex: 1;
+        }
+        .saver-nav-role {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-width: 30px;
+          height: 22px;
+          border-radius: 999px;
+          font-size: 11px;
+          font-weight: 700;
+          margin-top: 1px;
+        }
+        .saver-nav-role.assistant {
+          color: #1d4ed8;
+          background: #dbeafe;
+        }
+        .saver-nav-role.user {
+          color: #065f46;
+          background: #d1fae5;
+        }
+        .saver-nav-body {
+          min-width: 0;
+          flex: 1;
+        }
+        .saver-nav-index {
+          font-size: 11px;
+          color: var(--saver-sub-text);
+          margin-bottom: 3px;
+        }
+        .saver-nav-snippet {
+          font-size: 12px;
+          color: var(--saver-text);
+          line-height: 1.45;
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+          overflow: hidden;
+          word-break: break-word;
+        }
+        .saver-nav-item.compact .saver-nav-snippet {
+          -webkit-line-clamp: 1;
+          font-size: 11px;
+        }
+        .saver-nav-fav-btn {
+          border: 1px solid var(--saver-border);
+          background: var(--saver-sec-btn-bg);
+          color: #6b7280;
+          border-radius: 999px;
+          width: 28px;
+          height: 28px;
+          cursor: pointer;
+          font-size: 14px;
+          line-height: 1;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          transition: all 0.18s ease;
+        }
+        .saver-nav-fav-btn:hover {
+          color: #f59e0b;
+          border-color: #fcd34d;
+          background: #fffbeb;
+        }
+        .saver-nav-fav-title {
+          font-size: 12px;
+          color: var(--saver-sub-text);
+          margin: 10px 0 6px;
+          font-weight: 700;
+          padding-left: 2px;
+        }
+        .saver-nav-group {
+          margin-bottom: 8px;
+          border: 1px solid var(--saver-border);
+          border-radius: 12px;
+          background: var(--saver-format-bg);
+          padding: 6px;
+        }
+        .saver-nav-group .saver-ws-header {
+          border-radius: 10px;
+          font-size: 12px;
+        }
+        .saver-nav-group-title {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .saver-nav-group .saver-ws-children {
+          padding-left: 4px;
+          padding-right: 2px;
+        }
       `;
       document.head.appendChild(style);
     },
@@ -1094,16 +1518,36 @@
       panel.innerHTML = `
         <div class="saver-resize-handle" id="saver-resize-handle"></div>
         <div class="saver-panel-header" style="position: relative;">
-          <h3>💬 ChatGPT 对话保存助手</h3>
+          <div class="saver-header-title-row">
+            <h3>💬 ChatGPT 对话保存助手</h3>
+            <div class="saver-header-actions">
+              <button id="saver-sidebar-close" class="saver-header-icon-btn" title="收起侧边栏">✕</button>
+              <button id="saver-theme-toggle" class="saver-header-icon-btn" title="切换主题">🌞</button>
+            </div>
+          </div>
           <p>自动保存您的智慧对话 <span id="saver-cardkey-badge" class="saver-cardkey-info" style="display:none;" title="点击管理卡密"></span></p>
-          <button id="saver-sidebar-close" style="position: absolute; top: 12px; right: 40px; background: none; border: none; cursor: pointer; font-size: 18px; padding: 0; line-height: 1; color: var(--saver-header-text); opacity: 0.7;" title="收起侧边栏">✕</button>
-          <button id="saver-theme-toggle" style="position: absolute; top: 12px; right: 12px; background: none; border: none; cursor: pointer; font-size: 18px; padding: 0; line-height: 1;">🌞</button>
+          <div class="saver-header-meta-row">
+            <label class="saver-view-label" for="saver-view-select">页面</label>
+            <select id="saver-view-select" class="saver-view-select">
+              <option value="save">💾 保存</option>
+              <option value="context">🔄 延续</option>
+              <option value="nav">🧭 导航</option>
+              <option value="template">📋 模板</option>
+              <option value="about">ℹ️ 关于</option>
+            </select>
+          </div>
+          <div class="saver-header-tools">
+            <button class="saver-tool-btn primary" id="saver-export-btn">⭳ 导出</button>
+            <button class="saver-tool-btn" id="saver-selection-btn">✂️ 选取</button>
+            <button class="saver-tool-btn" id="saver-select-folder">📁 文件夹</button>
+          </div>
         </div>
         <div class="saver-tab-bar">
           <button class="saver-tab active" data-tab="save">💾 保存</button>
           <button class="saver-tab" data-tab="context">🔄 延续</button>
           <button class="saver-tab" data-tab="nav">🧭 导航</button>
           <button class="saver-tab" data-tab="template">📋 模板</button>
+          <button class="saver-tab" data-tab="about">ℹ️ 关于</button>
         </div>
         <div class="saver-tab-content active" id="saver-tab-save">
           <div class="saver-panel-content">
@@ -1135,15 +1579,12 @@
                 <option value="visual">视觉还原（画布截图）</option>
               </select>
             </div>
-            <button class="saver-action-btn" id="saver-export-btn">💾 立即导出当前对话</button>
-            <button class="saver-action-btn secondary" id="saver-selection-btn">✂️ 选择导出</button>
-            <div id="saver-selection-bar" style="display:none;margin-bottom:8px;">
+            <div id="saver-selection-bar" class="saver-selection-bar" style="display:none;">
               <div style="display:flex;gap:8px;">
                 <button class="saver-action-btn" id="saver-export-selected" disabled style="flex:1;">导出选中 (0)</button>
                 <button class="saver-action-btn secondary" id="saver-exit-selection" style="flex:1;">退出选择</button>
               </div>
             </div>
-            <button class="saver-action-btn secondary" id="saver-select-folder">📁 选择保存文件夹</button>
             <div class="saver-divider"></div>
             <div id="saver-folder-status" style="margin-bottom: 8px; font-size: 12px; color: var(--saver-sub-text);">
               保存位置: <span id="saver-folder-name" style="color: var(--saver-active-color);">未设置</span>
@@ -1186,14 +1627,20 @@
         </div>
         <div class="saver-tab-content" id="saver-tab-nav">
           <div class="saver-panel-content">
-            <div style="font-size: 12px; color: var(--saver-sub-text); margin-bottom: 6px; font-weight: 600;">🧭 对话导航 <span id="saver-nav-quota" style="font-weight:400;opacity:0.85;"></span></div>
-            <input type="text" id="saver-nav-search" placeholder="🔍 搜索当前对话消息..." style="width:100%;padding:8px 10px;border:1px solid var(--saver-border);border-radius:8px;font-size:12px;outline:none;background:var(--saver-format-bg);color:var(--saver-text);box-sizing:border-box;margin-bottom:8px;" />
-            <div id="saver-nav-stats" style="font-size:11px;color:var(--saver-sub-text);margin-bottom:8px;">加载中...</div>
-            <div id="saver-nav-list" class="saver-context-list">
+            <div class="saver-nav-head">
+              <div class="saver-nav-title">🧭 对话导航 <span id="saver-nav-quota"></span></div>
+              <div class="saver-nav-desc">回车跳转首个匹配项，收藏常用消息锚点</div>
+            </div>
+            <div class="saver-nav-search-wrap">
+              <span class="saver-nav-search-icon">🔍</span>
+              <input type="text" id="saver-nav-search" class="saver-nav-search-input" placeholder="搜索消息内容、关键词..." />
+            </div>
+            <div id="saver-nav-stats" class="saver-nav-stats">加载中...</div>
+            <div id="saver-nav-list" class="saver-context-list saver-nav-list">
               <div class="saver-context-status">正在提取对话消息...</div>
             </div>
-            <div style="font-size: 12px; color: var(--saver-sub-text); margin: 10px 0 6px; font-weight: 600;">⭐ 收藏（按对话分组）</div>
-            <div id="saver-nav-favorites" class="saver-context-list">
+            <div class="saver-nav-fav-title">⭐ 收藏（按对话分组）</div>
+            <div id="saver-nav-favorites" class="saver-context-list saver-nav-list">
               <div class="saver-context-status">暂无收藏</div>
             </div>
           </div>
@@ -1207,6 +1654,31 @@
             <div id="saver-template-quota" style="font-size:11px;color:var(--saver-sub-text);opacity:0.85;margin-bottom:6px;"></div>
             <div style="font-size:11px;color:var(--saver-sub-text);opacity:0.8;margin-bottom:8px;">内置模板支持编辑与恢复默认，自定义模板支持新增/编辑/删除。</div>
             <div id="saver-ctx-template-list" style="overflow-y:auto;margin-bottom:8px;"></div>
+          </div>
+        </div>
+        <div class="saver-tab-content" id="saver-tab-about">
+          <div class="saver-panel-content">
+            <div class="saver-about-card">
+              <div class="saver-about-row">
+                <span>插件版本</span>
+                <strong id="saver-about-version">-</strong>
+              </div>
+              <div class="saver-about-row">
+                <span>最新版本</span>
+                <strong id="saver-about-latest">-</strong>
+              </div>
+              <div id="saver-about-status" class="saver-about-status">准备加载公告...</div>
+              <div class="saver-about-btn-row">
+                <button id="saver-about-refresh" class="saver-about-btn">刷新公告</button>
+                <button id="saver-about-upgrade" class="saver-about-btn primary" disabled>一键升级</button>
+              </div>
+            </div>
+            <div class="saver-about-card">
+              <div style="font-size: 12px; color: var(--saver-sub-text); margin-bottom: 6px; font-weight: 600;">📢 插件公告</div>
+              <div id="saver-about-notice" class="saver-about-notice">
+                <div class="saver-context-status">加载中...</div>
+              </div>
+            </div>
           </div>
         </div>
       `;
@@ -1317,11 +1789,13 @@
 
       // 选择导出模式
       document.getElementById('saver-selection-btn').onclick = () => {
+        activateTab('save');
         const sm = window.ChatGPTSaver.SelectionManager;
         if (!sm) return;
         sm.activate();
         document.getElementById('saver-selection-bar').style.display = 'block';
-        document.getElementById('saver-selection-btn').style.display = 'none';
+        const selectBtn = document.getElementById('saver-selection-btn');
+        if (selectBtn) selectBtn.classList.add('active');
         this._injectCheckboxOverlays();
       };
 
@@ -1383,19 +1857,36 @@
         e.target.textContent = config.showLogPanel ? '✅ 显示日志' : '⚪ 显示日志';
       };
 
-      // Tab 切换
+      // Tab 切换（隐藏旧 Tab 栏，使用顶部页面选择器）
+      const activateTab = (tabKey = 'save') => {
+        const key = String(tabKey || 'save');
+        panel.querySelectorAll('.saver-tab').forEach(t => t.classList.remove('active'));
+        panel.querySelectorAll('.saver-tab-content').forEach(c => c.classList.remove('active'));
+        const tabBtn = panel.querySelector(`.saver-tab[data-tab="${key}"]`);
+        const tabContent = document.getElementById('saver-tab-' + key);
+        if (tabBtn) tabBtn.classList.add('active');
+        if (tabContent) tabContent.classList.add('active');
+
+        const viewSelect = document.getElementById('saver-view-select');
+        if (viewSelect && viewSelect.value !== key) viewSelect.value = key;
+
+        if (key === 'context') ContextManager.refreshList();
+        if (key === 'nav') ChatNavigator.refresh();
+        if (key === 'template') this._refreshTemplateList();
+        if (key === 'about') AboutManager.refresh();
+        this.refreshFeatureQuotaIndicators();
+      };
+
       panel.querySelectorAll('.saver-tab').forEach(tab => {
-        tab.onclick = () => {
-          panel.querySelectorAll('.saver-tab').forEach(t => t.classList.remove('active'));
-          panel.querySelectorAll('.saver-tab-content').forEach(c => c.classList.remove('active'));
-          tab.classList.add('active');
-          document.getElementById('saver-tab-' + tab.dataset.tab).classList.add('active');
-          if (tab.dataset.tab === 'context') ContextManager.refreshList();
-          if (tab.dataset.tab === 'nav') ChatNavigator.refresh();
-          if (tab.dataset.tab === 'template') this._refreshTemplateList();
-          this.refreshFeatureQuotaIndicators();
-        };
+        tab.onclick = () => activateTab(tab.dataset.tab);
       });
+
+      const viewSelect = document.getElementById('saver-view-select');
+      if (viewSelect) {
+        viewSelect.value = 'save';
+        viewSelect.onchange = () => activateTab(viewSelect.value);
+      }
+      activateTab('save');
 
       // 上下文列表搜索过滤
       const ctxSearchInput = document.getElementById('saver-context-search');
@@ -1434,6 +1925,23 @@
           this._showTemplateEditor(null, { create: true });
         };
       }
+
+      const aboutRefreshBtn = document.getElementById('saver-about-refresh');
+      if (aboutRefreshBtn) {
+        aboutRefreshBtn.onclick = () => AboutManager.refresh({ forceRefresh: true });
+      }
+
+      const aboutUpgradeBtn = document.getElementById('saver-about-upgrade');
+      if (aboutUpgradeBtn) {
+        aboutUpgradeBtn.onclick = () => {
+          const url = aboutUpgradeBtn.dataset.upgradeUrl || '';
+          if (!url) return;
+          window.open(url, '_blank', 'noopener,noreferrer');
+        };
+      }
+
+      AboutManager.renderBase();
+      AboutManager.refresh();
 
       this.refreshFeatureQuotaIndicators();
 
@@ -1964,7 +2472,7 @@
       const bar = document.getElementById('saver-selection-bar');
       const btn = document.getElementById('saver-selection-btn');
       if (bar) bar.style.display = 'none';
-      if (btn) btn.style.display = 'block';
+      if (btn) btn.classList.remove('active');
     },
 
     async _refreshTemplateList() {
@@ -2164,6 +2672,168 @@
         .replace(/'/g, '&#39;');
     },
 
+  };
+
+  const AboutManager = {
+    state: {
+      loading: false,
+      loaded: false,
+      data: null,
+      stale: false,
+      source: 'empty',
+      fetchedAt: null,
+      error: ''
+    },
+
+    getRenderer() {
+      return window.ChatGPTSaver?.AboutRenderer || null;
+    },
+
+    getPluginVersion() {
+      return chrome.runtime?.getManifest?.().version || config.currentVersion || '-';
+    },
+
+    getSafeNoticeHtml(markdownText) {
+      const renderer = this.getRenderer();
+      if (renderer?.renderMarkdownSafe) {
+        return renderer.renderMarkdownSafe(markdownText, {
+          marked: typeof marked !== 'undefined' ? marked : null,
+          DOMPurify: typeof DOMPurify !== 'undefined' ? DOMPurify : null
+        });
+      }
+
+      const safeText = String(markdownText || '暂无公告')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+      return `<p>${safeText.replace(/\n/g, '<br>')}</p>`;
+    },
+
+    buildViewModel() {
+      const renderer = this.getRenderer();
+      if (renderer?.buildAboutViewModel) {
+        return renderer.buildAboutViewModel(this.state.data || {}, this.getPluginVersion());
+      }
+      const source = this.state.data && typeof this.state.data === 'object' ? this.state.data : {};
+      return {
+        pluginVersion: this.getPluginVersion(),
+        latestVersion: String(source.latestVersion || source.latest_version || source.version || ''),
+        noticeMarkdown: String(source.noticeMarkdown || source.notice_markdown || source.announcement || source.notice || ''),
+        upgradeUrl: String(source.upgradeUrl || source.upgrade_url || source.upgrade_link || ''),
+        upgradeLabel: '一键升级'
+      };
+    },
+
+    formatFetchedAt(ts) {
+      const value = Number(ts);
+      if (!Number.isFinite(value) || value <= 0) return '';
+      try {
+        return new Date(value).toLocaleString('zh-CN');
+      } catch (error) {
+        return '';
+      }
+    },
+
+    async requestClientConfig(forceRefresh = false) {
+      return new Promise((resolve) => {
+        chrome.runtime.sendMessage(
+          { action: 'pluginGetClientConfig', forceRefresh: !!forceRefresh },
+          (resp) => resolve(resp || { success: false, message: '空响应' })
+        );
+      });
+    },
+
+    renderBase() {
+      const versionEl = document.getElementById('saver-about-version');
+      if (versionEl) versionEl.textContent = this.getPluginVersion();
+      this.render();
+    },
+
+    render() {
+      const versionEl = document.getElementById('saver-about-version');
+      const latestEl = document.getElementById('saver-about-latest');
+      const statusEl = document.getElementById('saver-about-status');
+      const noticeEl = document.getElementById('saver-about-notice');
+      const upgradeBtn = document.getElementById('saver-about-upgrade');
+      const refreshBtn = document.getElementById('saver-about-refresh');
+
+      if (!versionEl || !latestEl || !statusEl || !noticeEl || !upgradeBtn || !refreshBtn) {
+        return;
+      }
+
+      const vm = this.buildViewModel();
+      versionEl.textContent = vm.pluginVersion || '-';
+      latestEl.textContent = vm.latestVersion || '-';
+
+      const hasNotice = typeof vm.noticeMarkdown === 'string' && vm.noticeMarkdown.trim().length > 0;
+      if (this.state.loading && !this.state.loaded) {
+        noticeEl.innerHTML = '<div class="saver-context-status">正在加载公告...</div>';
+      } else if (hasNotice) {
+        noticeEl.innerHTML = this.getSafeNoticeHtml(vm.noticeMarkdown);
+      } else if (this.state.error) {
+        noticeEl.innerHTML = `<div class="saver-context-status">公告加载失败：${UI._escapeHtml(this.state.error)}</div>`;
+      } else {
+        noticeEl.innerHTML = '<div class="saver-context-status">暂无公告</div>';
+      }
+
+      const fetchedAtText = this.formatFetchedAt(this.state.fetchedAt);
+      if (this.state.loading) {
+        statusEl.textContent = '正在拉取最新公告...';
+      } else if (this.state.stale) {
+        statusEl.textContent = fetchedAtText
+          ? `网络异常，已展示缓存公告（${fetchedAtText}）`
+          : '网络异常，已展示缓存公告';
+      } else if (this.state.error && !hasNotice) {
+        statusEl.textContent = `加载失败：${this.state.error}`;
+      } else if (fetchedAtText) {
+        statusEl.textContent = `公告更新时间：${fetchedAtText}`;
+      } else {
+        statusEl.textContent = this.state.loaded ? '公告已更新' : '准备加载公告...';
+      }
+
+      const upgradeUrl = vm.upgradeUrl || '';
+      const upgradeLabel = vm.upgradeLabel || '一键升级';
+      upgradeBtn.textContent = upgradeLabel;
+      upgradeBtn.dataset.upgradeUrl = upgradeUrl;
+      upgradeBtn.disabled = !upgradeUrl;
+      refreshBtn.disabled = this.state.loading;
+    },
+
+    async refresh(options = {}) {
+      if (this.state.loading) return;
+
+      this.state.loading = true;
+      this.render();
+
+      try {
+        const response = await this.requestClientConfig(options.forceRefresh === true);
+        if (response?.success) {
+          this.state.data = response.data || {};
+          this.state.stale = response.stale === true;
+          this.state.source = response.source || 'network';
+          this.state.fetchedAt = response.fetchedAt || null;
+          this.state.error = response.error || '';
+        } else {
+          this.state.error = response?.message || response?.error || '请求失败';
+          this.state.data = null;
+          this.state.stale = false;
+          this.state.source = 'empty';
+          this.state.fetchedAt = null;
+        }
+      } catch (error) {
+        this.state.error = error?.message || '请求失败';
+        this.state.data = null;
+        this.state.stale = false;
+        this.state.source = 'empty';
+        this.state.fetchedAt = null;
+      } finally {
+        this.state.loading = false;
+        this.state.loaded = true;
+        this.render();
+      }
+    }
   };
 
   // 暴露 UI 的日志接口给 Exporter 使用（兼容 Logger 接口）
@@ -3003,6 +3673,15 @@
       return this._getCurrentFavorites().some(f => f.messageId === messageId);
     },
 
+    _escapeHtml(text) {
+      return String(text || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    },
+
     async _toggleFavorite(item) {
       if (!item) return;
       const list = this._favorites[this._conversationId] || [];
@@ -3102,23 +3781,27 @@
         : this._messages;
 
       if (statsEl) {
-        statsEl.textContent = `当前对话 ${this._messages.length} 条消息，命中 ${filtered.length} 条`;
+        statsEl.textContent = `当前对话 ${this._messages.length} 条消息，匹配 ${filtered.length} 条`;
       }
 
       if (!filtered.length) {
         listEl.innerHTML = '<div class="saver-context-status">没有匹配消息</div>';
       } else {
         listEl.innerHTML = filtered.map(item => {
-          const icon = item.role === 'assistant' ? '🤖' : '👤';
+          const roleClass = item.role === 'assistant' ? 'assistant' : 'user';
+          const roleLabel = item.role === 'assistant' ? 'AI' : '你';
+          const safeSnippet = this._escapeHtml(item.snippet || '');
           const fav = this._isFavorite(item.messageId) ? '⭐' : '☆';
           return `
-            <div class="saver-context-item" data-nav-message-id="${item.messageId}" data-nav-index="${item.index}" style="cursor:pointer;">
-              <span class="ctx-icon">${icon}</span>
-              <div class="ctx-info">
-                <div class="ctx-title">#${item.index + 1}</div>
-                <div class="ctx-meta">${item.snippet}</div>
+            <div class="saver-nav-item" data-nav-message-id="${item.messageId}" data-nav-index="${item.index}">
+              <div class="saver-nav-main">
+                <span class="saver-nav-role ${roleClass}">${roleLabel}</span>
+                <div class="saver-nav-body">
+                  <div class="saver-nav-index">#${item.index + 1}</div>
+                  <div class="saver-nav-snippet">${safeSnippet}</div>
+                </div>
               </div>
-              <button class="saver-nav-fav-btn" data-fav-id="${item.messageId}" data-fav-index="${item.index}" style="background:none;border:none;cursor:pointer;font-size:15px;line-height:1;">${fav}</button>
+              <button class="saver-nav-fav-btn" data-fav-id="${item.messageId}" data-fav-index="${item.index}" title="收藏 / 取消收藏">${fav}</button>
             </div>
           `;
         }).join('');
@@ -3149,21 +3832,23 @@
       } else {
         favEl.innerHTML = grouped.map(([convId, items]) => {
           if (!Array.isArray(items) || !items.length) return '';
-          const title = items[0]?.conversationTitle || convId;
+          const title = this._escapeHtml(items[0]?.conversationTitle || convId);
           return `
-            <div class="saver-ws-group" data-conv-id="${convId}">
+            <div class="saver-ws-group saver-nav-group" data-conv-id="${convId}">
               <div class="saver-ws-header expanded">
                 <span class="saver-ws-arrow">▶</span>
-                <span>🗂️ ${title}</span>
+                <span class="saver-nav-group-title">🗂️ ${title}</span>
                 <span class="saver-ws-count">${items.length}</span>
               </div>
               <div class="saver-ws-children">
                 ${items.map(item => `
-                  <div class="saver-context-item" data-fav-jump-id="${item.messageId}" data-fav-jump-index="${item.indexHint}" data-fav-conv-id="${item.conversationId}" style="cursor:pointer;">
-                    <span class="ctx-icon">${item.role === 'assistant' ? '🤖' : '👤'}</span>
-                    <div class="ctx-info">
-                      <div class="ctx-title">#${(item.indexHint || 0) + 1}</div>
-                      <div class="ctx-meta">${item.snippet || ''}</div>
+                  <div class="saver-nav-item compact" data-fav-jump-id="${item.messageId}" data-fav-jump-index="${item.indexHint}" data-fav-conv-id="${item.conversationId}">
+                    <div class="saver-nav-main">
+                      <span class="saver-nav-role ${item.role === 'assistant' ? 'assistant' : 'user'}">${item.role === 'assistant' ? 'AI' : '你'}</span>
+                      <div class="saver-nav-body">
+                        <div class="saver-nav-index">#${(item.indexHint || 0) + 1}</div>
+                        <div class="saver-nav-snippet">${this._escapeHtml(item.snippet || '')}</div>
+                      </div>
                     </div>
                   </div>
                 `).join('')}

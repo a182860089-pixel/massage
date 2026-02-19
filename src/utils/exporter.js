@@ -20,10 +20,11 @@ const Exporter = {
    * @param {Object} options - 其他参数
    * @param {'structured'|'visual'} options.pdfMode - PDF 导出模式
    */
-  async exportConversation(formats = { html: true, md: true, pdf: true }, forceExport = false, options = {}) {
+  async exportConversation(formats = { html: true, md: true, pdf: true, json: true }, forceExport = false, options = {}) {
     const parser = window.ChatGPTSaver.Parser;
     const fileSystem = window.ChatGPTSaver.FileSystem;
     const logger = window.ChatGPTSaver?.Logger;
+    const quotaManager = window.ChatGPTSaver?.FeatureQuotaManager;
     
     // 显示日志面板（如果还没显示的话）
     if (logger && !logger.panelVisible) {
@@ -31,6 +32,26 @@ const Exporter = {
       logger.showPanel();
     }
     
+    let effectiveFormats = {
+      html: formats?.html !== false,
+      md: formats?.md !== false,
+      pdf: formats?.pdf !== false,
+      json: formats?.json !== false
+    };
+
+    if (quotaManager?.applyExportFormats) {
+      const applied = await quotaManager.applyExportFormats(effectiveFormats);
+      effectiveFormats = applied.formats;
+      if (applied.blocked?.length) {
+        const blockedText = applied.blocked.map(k => k.toUpperCase()).join(' / ');
+        this.log(`⚠️ 已自动禁用无额度格式: ${blockedText}`);
+      }
+    }
+
+    if (!effectiveFormats.html && !effectiveFormats.md && !effectiveFormats.pdf && !effectiveFormats.json) {
+      return { success: false, error: '可导出格式额度已用完或未勾选可用格式' };
+    }
+
     // 获取对话标题
     const title = parser.getConversationTitle();
     
@@ -77,7 +98,7 @@ const Exporter = {
     try {
       // 生成 JSON
       let jsonContent = null;
-      if (formats.json) {
+      if (effectiveFormats.json) {
         this.log('📦 生成 JSON...');
         jsonContent = window.ChatGPTSaver.JSONExporter.export();
         if (jsonContent) {
@@ -90,21 +111,21 @@ const Exporter = {
       }
       
       // 生成 HTML
-      if (formats.html) {
+      if (effectiveFormats.html) {
         this.log('📦 生成 HTML...');
         htmlContent = window.ChatGPTSaver.HTMLExporter.exportWithFullStyles();
         this.log(`✅ HTML 完成, 长度: ${htmlContent?.length || 0} 字符`);
       }
       
       // 生成 Markdown
-      if (formats.md) {
+      if (effectiveFormats.md) {
         this.log('📦 生成 Markdown...');
         mdContent = window.ChatGPTSaver.MarkdownExporter.export();
         this.log(`✅ Markdown 完成, 长度: ${mdContent?.length || 0} 字符`);
       }
       
       // 生成 PDF
-      if (formats.pdf) {
+      if (effectiveFormats.pdf) {
         this.log('📦 生成 PDF...');
         // 检查 PDF 导出是否可用
         if (!window.ChatGPTSaver.PDFExporter.isAvailable()) {
@@ -145,13 +166,19 @@ const Exporter = {
       // 保存文件
       if (fileSystem.isAuthorized()) {
         this.log('💾 开始保存到本地文件夹...');
-        const result = await fileSystem.saveConversation(title, htmlContent, mdContent, pdfBlob, formats, workspaceName, jsonContent);
+        const result = await fileSystem.saveConversation(title, htmlContent, mdContent, pdfBlob, effectiveFormats, workspaceName, jsonContent);
         if (result.success) {
           this.log(`✅ 保存成功! 格式: ${result.saved.join(', ').toUpperCase()}`);
           if (result.workspaceName) {
             this.log(`📂 保存位置: ${result.workspaceName}/${result.folderName}`);
           } else {
             this.log(`📂 保存位置: ${result.folderName}`);
+          }
+          if (quotaManager?.consumeExportFormats) {
+            await quotaManager.consumeExportFormats(result.saved || []);
+          }
+          if (window.ChatGPTSaver?.UI?.refreshFeatureQuotaIndicators) {
+            window.ChatGPTSaver.UI.refreshFeatureQuotaIndicators();
           }
           // 更新日志面板状态为成功
           if (logger) {
@@ -166,10 +193,16 @@ const Exporter = {
         return result;
       } else {
         this.log('⚠️ 未授权文件夹，使用下载方式保存...');
-        const result = await window.ChatGPTSaver.DownloadFallback.saveConversation(title, htmlContent, mdContent, pdfBlob, formats);
+        const result = await window.ChatGPTSaver.DownloadFallback.saveConversation(title, htmlContent, mdContent, pdfBlob, effectiveFormats);
         if (result.success && logger) {
           const msg = `「${result.title}」已下载 (${result.saved.join(', ').toUpperCase()})`;
           logger.complete('下载成功', msg);
+        }
+        if (result.success && quotaManager?.consumeExportFormats) {
+          await quotaManager.consumeExportFormats(result.saved || []);
+        }
+        if (result.success && window.ChatGPTSaver?.UI?.refreshFeatureQuotaIndicators) {
+          window.ChatGPTSaver.UI.refreshFeatureQuotaIndicators();
         }
         return result;
       }
@@ -237,15 +270,31 @@ const Exporter = {
   async exportSelectedMessages(conversation, formats = { html: true, md: true, json: true }) {
     const fileSystem = window.ChatGPTSaver.FileSystem;
     const logger = window.ChatGPTSaver?.Logger;
+    const quotaManager = window.ChatGPTSaver?.FeatureQuotaManager;
 
     if (logger && !logger.panelVisible) { logger.clear(); logger.showPanel(); }
 
     this.log(`📝 导出选中消息: ${conversation.title} (${conversation.messages.length} 条)`);
 
+    let effectiveFormats = {
+      html: formats?.html !== false,
+      md: formats?.md !== false,
+      pdf: formats?.pdf !== false,
+      json: formats?.json !== false
+    };
+    if (quotaManager?.applyExportFormats) {
+      const applied = await quotaManager.applyExportFormats(effectiveFormats);
+      effectiveFormats = applied.formats;
+    }
+
+    if (!effectiveFormats.html && !effectiveFormats.md && !effectiveFormats.pdf && !effectiveFormats.json) {
+      return { success: false, error: '可导出格式额度已用完或未勾选可用格式' };
+    }
+
     let htmlContent = null, mdContent = null, pdfBlob = null, jsonContent = null;
 
     try {
-      if (formats.json && window.ChatGPTSaver.JSONExporter) {
+      if (effectiveFormats.json && window.ChatGPTSaver.JSONExporter) {
         this.log('📦 生成 JSON...');
         const data = window.ChatGPTSaver.JSONExporter.exportFromConversation({
           title: conversation.title,
@@ -256,17 +305,17 @@ const Exporter = {
         if (data) jsonContent = window.ChatGPTSaver.JSONExporter.serialize(data);
       }
 
-      if (formats.html && window.ChatGPTSaver.HTMLExporter) {
+      if (effectiveFormats.html && window.ChatGPTSaver.HTMLExporter) {
         this.log('📦 生成 HTML...');
         htmlContent = window.ChatGPTSaver.HTMLExporter.exportFromMessages(conversation.messages, conversation.title);
       }
 
-      if (formats.md && window.ChatGPTSaver.MarkdownExporter) {
+      if (effectiveFormats.md && window.ChatGPTSaver.MarkdownExporter) {
         this.log('📦 生成 Markdown...');
         mdContent = window.ChatGPTSaver.MarkdownExporter.exportFromMessages(conversation.messages, conversation.title);
       }
 
-      if (formats.pdf && window.ChatGPTSaver.PDFExporter?.isAvailable()) {
+      if (effectiveFormats.pdf && window.ChatGPTSaver.PDFExporter?.isAvailable()) {
         this.log('📦 生成 PDF...');
         // For selected messages, use streamed export with custom messages
         // Skip PDF for fragment export to keep it simple — PDF requires DOM rendering
@@ -277,9 +326,15 @@ const Exporter = {
         this.log('💾 保存到本地文件夹...');
         const workspaceName = window.ChatGPTSaver.Parser.getWorkspaceName();
         const result = await fileSystem.saveConversation(
-          conversation.title, htmlContent, mdContent, pdfBlob, formats, workspaceName, jsonContent
+          conversation.title, htmlContent, mdContent, pdfBlob, effectiveFormats, workspaceName, jsonContent
         );
         if (result.success) {
+          if (quotaManager?.consumeExportFormats) {
+            await quotaManager.consumeExportFormats(result.saved || []);
+          }
+          if (window.ChatGPTSaver?.UI?.refreshFeatureQuotaIndicators) {
+            window.ChatGPTSaver.UI.refreshFeatureQuotaIndicators();
+          }
           this.log(`✅ 保存成功! 格式: ${result.saved.join(', ').toUpperCase()}`);
           if (logger) logger.complete('保存成功', `「${result.title}」已保存`);
         }
@@ -287,8 +342,14 @@ const Exporter = {
       } else {
         this.log('⚠️ 未授权文件夹，使用下载方式...');
         const result = await window.ChatGPTSaver.DownloadFallback?.saveConversation(
-          conversation.title, htmlContent, mdContent, pdfBlob, formats
+          conversation.title, htmlContent, mdContent, pdfBlob, effectiveFormats
         );
+        if (result?.success && quotaManager?.consumeExportFormats) {
+          await quotaManager.consumeExportFormats(result.saved || []);
+        }
+        if (result?.success && window.ChatGPTSaver?.UI?.refreshFeatureQuotaIndicators) {
+          window.ChatGPTSaver.UI.refreshFeatureQuotaIndicators();
+        }
         return result || { success: false, error: '下载失败' };
       }
     } catch (error) {

@@ -238,6 +238,12 @@
       if (AccessManager?.clearCardAccessFallback) {
         await AccessManager.clearCardAccessFallback();
       }
+      if (window.ChatGPTSaver?.UI?.updateCardKeyBadge) {
+        window.ChatGPTSaver.UI.updateCardKeyBadge();
+      }
+      if (window.ChatGPTSaver?.UI?.refreshFeatureQuotaIndicators) {
+        window.ChatGPTSaver.UI.refreshFeatureQuotaIndicators();
+      }
     },
 
     normalizeNumber(value) {
@@ -915,7 +921,9 @@
         .saver-format-group { display: flex; gap: 8px; margin-bottom: 16px; }
         .saver-format-btn { flex: 1; padding: 10px; border: 2px solid var(--saver-border); border-radius: 8px; background: var(--saver-format-bg); cursor: pointer; text-align: center; transition: all 0.2s; }
         .saver-format-btn.active { border-color: var(--saver-format-active-border); background: var(--saver-format-active-bg); }
+        .saver-format-btn.disabled { opacity: 0.45; cursor: not-allowed; pointer-events: none; }
         .saver-format-btn span { display: block; font-size: 12px; color: var(--saver-sub-text); margin-top: 4px; }
+        .saver-format-quota { display: block; font-size: 10px; margin-top: 3px; color: #ef4444; }
         .saver-action-btn { width: 100%; padding: 12px; border: none; border-radius: 8px; background: var(--saver-primary-btn-bg); color: var(--saver-primary-btn-text); font-size: 14px; font-weight: 600; cursor: pointer; margin-bottom: 8px; transition: opacity 0.2s; }
         .saver-action-btn:hover { opacity: 0.9; }
         .saver-action-btn.secondary { background: var(--saver-sec-btn-bg); color: var(--saver-sec-btn-text); }
@@ -1045,14 +1053,19 @@
           hasMoved = false;
           return;
         }
-        const unavailableMessage = AccessManager.getUnavailableMessage();
-        if (!AccessManager.canUseNow()) {
-          this.showCardKeyOverlay(unavailableMessage);
-          return;
-        }
-        this.togglePanel();
+        this.handlePanelToggleRequest();
       };
       btn.addEventListener('mousedown', onMouseDown); document.addEventListener('mousemove', onMouseMove); document.addEventListener('mouseup', onMouseUp); btn.addEventListener('click', onClick);
+    },
+
+    handlePanelToggleRequest() {
+      const unavailableMessage = AccessManager.getUnavailableMessage();
+      if (!AccessManager.canUseNow()) {
+        this.showCardKeyOverlay(unavailableMessage);
+        return { success: false, blocked: true };
+      }
+      this.togglePanel();
+      return { success: true };
     },
 
     createToast() {
@@ -1111,8 +1124,8 @@
             </div>
             <div class="saver-format-group">
               <div class="saver-format-btn ${config.formats.html ? 'active' : ''}" data-format="html">📄<span>HTML</span></div>
-              <div class="saver-format-btn ${config.formats.md ? 'active' : ''}" data-format="md">📝<span>Markdown</span></div>
-              <div class="saver-format-btn ${config.formats.pdf ? 'active' : ''}" data-format="pdf">📕<span>PDF</span></div>
+              <div class="saver-format-btn ${config.formats.md ? 'active' : ''}" data-format="md">📝<span>Markdown</span><small class="saver-format-quota" data-quota-label="md" style="display:none;"></small></div>
+              <div class="saver-format-btn ${config.formats.pdf ? 'active' : ''}" data-format="pdf">📕<span>PDF</span><small class="saver-format-quota" data-quota-label="pdf" style="display:none;"></small></div>
               <div class="saver-format-btn ${config.formats.json ? 'active' : ''}" data-format="json">📦<span>JSON</span></div>
             </div>
             <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;">
@@ -1159,7 +1172,7 @@
         </div>
         <div class="saver-tab-content" id="saver-tab-context">
           <div class="saver-panel-content">
-            <div style="font-size: 12px; color: var(--saver-sub-text); margin-bottom: 4px; font-weight: 600;">📂 已保存的上下文</div>
+            <div style="font-size: 12px; color: var(--saver-sub-text); margin-bottom: 4px; font-weight: 600;">📂 已保存的上下文 <span id="saver-context-quota" style="font-weight:400;opacity:0.85;"></span></div>
             <div style="font-size: 11px; color: var(--saver-sub-text); opacity: 0.7; margin-bottom: 10px;">拖拽文件到 ChatGPT 对话框即可导入</div>
             <div style="display:flex;gap:6px;margin-bottom:8px;">
               <select id="saver-ctx-prompt-select" style="flex:1;padding:7px 8px;border:1px solid var(--saver-border);border-radius:8px;font-size:11px;background:var(--saver-format-bg);color:var(--saver-text);outline:none;cursor:pointer;"></select>
@@ -1173,7 +1186,7 @@
         </div>
         <div class="saver-tab-content" id="saver-tab-nav">
           <div class="saver-panel-content">
-            <div style="font-size: 12px; color: var(--saver-sub-text); margin-bottom: 6px; font-weight: 600;">🧭 对话导航</div>
+            <div style="font-size: 12px; color: var(--saver-sub-text); margin-bottom: 6px; font-weight: 600;">🧭 对话导航 <span id="saver-nav-quota" style="font-weight:400;opacity:0.85;"></span></div>
             <input type="text" id="saver-nav-search" placeholder="🔍 搜索当前对话消息..." style="width:100%;padding:8px 10px;border:1px solid var(--saver-border);border-radius:8px;font-size:12px;outline:none;background:var(--saver-format-bg);color:var(--saver-text);box-sizing:border-box;margin-bottom:8px;" />
             <div id="saver-nav-stats" style="font-size:11px;color:var(--saver-sub-text);margin-bottom:8px;">加载中...</div>
             <div id="saver-nav-list" class="saver-context-list">
@@ -1191,6 +1204,7 @@
               <div style="font-size: 12px; color: var(--saver-sub-text); font-weight: 600;">🔄 对话延续模板</div>
               <button id="saver-ctx-template-add" style="padding:6px 10px;border:1px solid var(--saver-border);border-radius:8px;background:var(--saver-format-bg);color:var(--saver-text);font-size:11px;cursor:pointer;">➕ 新增模板</button>
             </div>
+            <div id="saver-template-quota" style="font-size:11px;color:var(--saver-sub-text);opacity:0.85;margin-bottom:6px;"></div>
             <div style="font-size:11px;color:var(--saver-sub-text);opacity:0.8;margin-bottom:8px;">内置模板支持编辑与恢复默认，自定义模板支持新增/编辑/删除。</div>
             <div id="saver-ctx-template-list" style="overflow-y:auto;margin-bottom:8px;"></div>
           </div>
@@ -1256,9 +1270,11 @@
       // 格式按钮
       panel.querySelectorAll('.saver-format-btn').forEach(btn => {
         btn.onclick = () => {
+          if (btn.classList.contains('disabled')) return;
           btn.classList.toggle('active');
           config.formats[btn.dataset.format] = btn.classList.contains('active');
           chrome.storage.local.set({ exportFormats: config.formats });
+          this.refreshFeatureQuotaIndicators();
         };
       });
 
@@ -1331,7 +1347,7 @@
           if (result && result.success) {
             this.showToast(`✅ 已导出 ${selected.length} 条消息`, 'success', 3000);
           } else {
-            this.showToast('❌ 导出失败', 'error', 3000);
+            this.showToast(`❌ ${result?.error || '导出失败'}`, 'error', 3000);
           }
         } catch (e) {
           this.showToast('❌ ' + e.message, 'error', 3000);
@@ -1377,6 +1393,7 @@
           if (tab.dataset.tab === 'context') ContextManager.refreshList();
           if (tab.dataset.tab === 'nav') ChatNavigator.refresh();
           if (tab.dataset.tab === 'template') this._refreshTemplateList();
+          this.refreshFeatureQuotaIndicators();
         };
       });
 
@@ -1407,8 +1424,18 @@
 
       const addTplBtn = document.getElementById('saver-ctx-template-add');
       if (addTplBtn) {
-        addTplBtn.onclick = () => this._showTemplateEditor(null, { create: true });
+        addTplBtn.onclick = () => {
+          const info = ContextPromptTemplates.getTemplateCreateInfo();
+          if (!info.allowed) {
+            this.showToast(`❌ 免费版最多创建 ${info.limit} 个自定义模板`, 'error');
+            this.refreshFeatureQuotaIndicators();
+            return;
+          }
+          this._showTemplateEditor(null, { create: true });
+        };
       }
+
+      this.refreshFeatureQuotaIndicators();
 
     },
 
@@ -1431,8 +1458,13 @@
           msg.textContent = message;
           msg.className = message ? 'saver-cardkey-msg error' : 'saver-cardkey-msg';
         }
-        const defaultMode = AccessManager.hasUsedGuestTrial() && AccessManager.hasGuestTrialExpired() ? 'card' : 'choice';
-        this._switchAccessOverlayMode(defaultMode);
+        const input = document.getElementById('saver-cardkey-input');
+        const emailInput = document.getElementById('saver-cardkey-email-input');
+        if (input && emailInput) {
+          input.value = CardKeyManager.cardData?.card_key || '';
+          emailInput.value = CardKeyManager.cardData?.email || '';
+          (input.value ? emailInput : input).focus();
+        }
         return;
       }
 
@@ -1444,22 +1476,12 @@
           <button id="saver-cardkey-close" style="position: absolute; top: 12px; right: 12px; background: none; border: none; font-size: 20px; cursor: pointer; color: var(--saver-sub-text, #999); line-height: 1; padding: 4px;">✕</button>
           <img src="${chrome.runtime.getURL('icons/logo.jpg')}" style="width: 80px; height: 80px; border-radius: 50%; margin: 0 auto 12px; display: block; box-shadow: 0 4px 12px rgba(0,0,0,0.1); object-fit: cover;" />
           <h3>激活 ChatGPT 对话保存助手</h3>
-          <div id="saver-access-choice" style="display:none;">
-            <p style="margin-bottom: 12px;">请选择激活方式</p>
-            <div class="saver-cardkey-btn-row" style="margin-bottom: 10px;">
-              <button class="saver-cardkey-btn" id="saver-access-card">🔑 卡密激活</button>
-              <button class="saver-cardkey-btn secondary" id="saver-access-guest">🆓 游客登录（免费1天）</button>
-            </div>
-          </div>
-          <div id="saver-card-form" style="display:none;">
-            <p>请输入卡密和邮箱，绑定当前设备</p>
-            <input type="text" class="saver-cardkey-input" id="saver-cardkey-input" placeholder="请输入卡密" autocomplete="off" />
-            <input type="email" class="saver-cardkey-input" id="saver-cardkey-email-input" placeholder="请输入绑定邮箱" autocomplete="off" style="margin-top: 10px;" />
-            <div class="saver-cardkey-btn-row">
-              <button class="saver-cardkey-btn" id="saver-cardkey-submit">🔑 验证激活</button>
-              <button class="saver-cardkey-btn secondary" id="saver-cardkey-rebind">🔄 换绑设备</button>
-            </div>
-            <button id="saver-card-back" style="margin-top:6px;background:none;border:none;color:var(--saver-sub-text);cursor:pointer;font-size:12px;">← 返回方式选择</button>
+          <p>请输入卡密和邮箱，绑定当前设备</p>
+          <input type="text" class="saver-cardkey-input" id="saver-cardkey-input" placeholder="请输入卡密" autocomplete="off" />
+          <input type="email" class="saver-cardkey-input" id="saver-cardkey-email-input" placeholder="请输入绑定邮箱" autocomplete="off" style="margin-top: 10px;" />
+          <div class="saver-cardkey-btn-row">
+            <button class="saver-cardkey-btn" id="saver-cardkey-submit">🔑 验证激活</button>
+            <button class="saver-cardkey-btn secondary" id="saver-cardkey-rebind">🔄 换绑设备</button>
           </div>
           <div class="saver-cardkey-msg" id="saver-cardkey-msg">${message}</div>
         </div>
@@ -1469,44 +1491,24 @@
       // 关闭按钮
       document.getElementById('saver-cardkey-close').onclick = () => { overlay.style.display = 'none'; };
 
-      const choicePanel = document.getElementById('saver-access-choice');
-      const cardPanel = document.getElementById('saver-card-form');
-      const cardModeBtn = document.getElementById('saver-access-card');
-      const guestModeBtn = document.getElementById('saver-access-guest');
-      const backBtn = document.getElementById('saver-card-back');
       const input = document.getElementById('saver-cardkey-input');
       const emailInput = document.getElementById('saver-cardkey-email-input');
       const btn = document.getElementById('saver-cardkey-submit');
       const rebindBtn = document.getElementById('saver-cardkey-rebind');
       const msg = document.getElementById('saver-cardkey-msg');
 
-      this._switchAccessOverlayMode = (mode) => {
-        const finalMode = mode === 'card' ? 'card' : 'choice';
-        if (choicePanel) choicePanel.style.display = finalMode === 'choice' ? 'block' : 'none';
-        if (cardPanel) cardPanel.style.display = finalMode === 'card' ? 'block' : 'none';
-        if (finalMode === 'card') {
-          input.value = CardKeyManager.cardData?.card_key || '';
-          emailInput.value = CardKeyManager.cardData?.email || '';
-          (input.value ? emailInput : input).focus();
-        }
-      };
-
       const resetButtonState = () => {
         btn.disabled = false;
         rebindBtn.disabled = false;
-        if (guestModeBtn) guestModeBtn.disabled = false;
         btn.textContent = '🔑 验证激活';
         rebindBtn.textContent = '🔄 换绑设备';
-        if (guestModeBtn) guestModeBtn.textContent = '🆓 游客登录（免费1天）';
       };
 
       const setLoadingState = (mode) => {
         btn.disabled = true;
         rebindBtn.disabled = true;
-        if (guestModeBtn) guestModeBtn.disabled = true;
         btn.textContent = mode === 'activate' ? '⏳ 激活中...' : '🔑 验证激活';
         rebindBtn.textContent = mode === 'rebind' ? '⏳ 换绑中...' : '🔄 换绑设备';
-        if (guestModeBtn) guestModeBtn.textContent = mode === 'guest' ? '⏳ 登录中...' : '🆓 游客登录（免费1天）';
       };
 
       const getFormValue = () => {
@@ -1550,6 +1552,7 @@
         rebindBtn.textContent = '✅ 已换绑';
         await AccessManager.onCardActivated();
         this.updateCardKeyBadge();
+        this.refreshFeatureQuotaIndicators();
         await initAfterCardKey();
         setTimeout(() => {
           overlay.style.display = 'none';
@@ -1561,27 +1564,6 @@
         msg.textContent = normalizeFailureMessage(text);
         msg.className = 'saver-cardkey-msg error';
         resetButtonState();
-      };
-
-      const doGuestLogin = async () => {
-        setLoadingState('guest');
-        msg.textContent = '';
-        const clientId = CardKeyManager.clientId || (await CardKeyManager.ensureClientId?.());
-        const result = await AccessManager.activateGuestTrial(clientId);
-        if (!result.success) {
-          onFailure(result.message || '游客试用不可用');
-          this._switchAccessOverlayMode('card');
-          return;
-        }
-
-        msg.textContent = '✅ 游客登录成功，已开启 24 小时试用';
-        msg.className = 'saver-cardkey-msg success';
-        this.updateCardKeyBadge();
-        await initAfterCardKey();
-        setTimeout(() => {
-          overlay.style.display = 'none';
-          resetButtonState();
-        }, 700);
       };
 
       const doActivate = async () => {
@@ -1614,12 +1596,9 @@
       rebindBtn.onclick = doRebind;
       input.addEventListener('keydown', (e) => { if (e.key === 'Enter') doActivate(); });
       emailInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doActivate(); });
-      if (cardModeBtn) cardModeBtn.onclick = () => this._switchAccessOverlayMode('card');
-      if (backBtn) backBtn.onclick = () => this._switchAccessOverlayMode('choice');
-      if (guestModeBtn) guestModeBtn.onclick = doGuestLogin;
-
-      const defaultMode = AccessManager.hasUsedGuestTrial() && AccessManager.hasGuestTrialExpired() ? 'card' : 'choice';
-      this._switchAccessOverlayMode(defaultMode);
+      input.value = CardKeyManager.cardData?.card_key || '';
+      emailInput.value = CardKeyManager.cardData?.email || '';
+      (input.value ? emailInput : input).focus();
     },
 
     hideCardKeyOverlay() {
@@ -1631,16 +1610,14 @@
       const badge = document.getElementById('saver-cardkey-badge');
       if (!badge) return;
 
-      if (!AccessManager.canUseNow()) {
-        badge.style.display = 'none';
-        return;
-      }
+      AccessManager.canUseNow();
 
       const accessBadge = AccessManager.getBadgeInfo();
-      if (accessBadge.type === 'guest') {
+      if (accessBadge.type === 'free') {
         badge.style.display = 'inline-block';
-        badge.textContent = accessBadge.text || '🆓 游客试用';
+        badge.textContent = accessBadge.text || '🆓 免费版';
         badge.style.color = accessBadge.color || '';
+        this.refreshFeatureQuotaIndicators();
         return;
       }
 
@@ -1680,6 +1657,7 @@
       }
       badge.textContent = `🔑 剩余 ${remainDays} 天`;
       badge.style.color = remainDays <= 3 ? '#ef4444' : '';
+      this.refreshFeatureQuotaIndicators();
     },
 
     initCardKeyBadgeClick() {
@@ -1830,6 +1808,94 @@
 
       container.innerHTML = html;
       this._refreshSavedCount();
+      this.refreshFeatureQuotaIndicators();
+    },
+
+    async refreshFeatureQuotaIndicators() {
+      const quotaManager = window.ChatGPTSaver?.FeatureQuotaManager;
+      if (!quotaManager) return;
+
+      let customCount = 0;
+      if (typeof ContextPromptTemplates !== 'undefined' && ContextPromptTemplates?.getCustomTemplateCount) {
+        customCount = ContextPromptTemplates.getCustomTemplateCount();
+      }
+      const snapshot = await quotaManager.getSnapshot(customCount);
+      const isCard = snapshot.isCard;
+      let shouldPersistFormats = false;
+
+      ['md', 'pdf'].forEach((formatKey) => {
+        const btn = this.panel?.querySelector(`.saver-format-btn[data-format="${formatKey}"]`);
+        if (!btn) return;
+        const quotaLabel = btn.querySelector(`[data-quota-label="${formatKey}"]`);
+        const info = snapshot.export?.[formatKey];
+        if (!info) return;
+
+        if (isCard) {
+          btn.classList.remove('disabled');
+          if (quotaLabel) quotaLabel.style.display = 'none';
+          return;
+        }
+
+        if (quotaLabel) {
+          quotaLabel.style.display = 'block';
+          quotaLabel.textContent = `剩余 ${info.remaining}/${info.limit}`;
+        }
+
+        const exhausted = info.exhausted === true;
+        btn.classList.toggle('disabled', exhausted);
+        if (exhausted && config.formats[formatKey]) {
+          config.formats[formatKey] = false;
+          btn.classList.remove('active');
+          shouldPersistFormats = true;
+        }
+      });
+
+      if (shouldPersistFormats) {
+        chrome.storage.local.set({ exportFormats: config.formats });
+      }
+
+      const contextQuotaEl = document.getElementById('saver-context-quota');
+      if (contextQuotaEl) {
+        if (isCard) {
+          contextQuotaEl.textContent = '';
+        } else {
+          const q = snapshot.monthly.continuation;
+          contextQuotaEl.textContent = `· 免费剩余 ${q.remaining}/${q.limit} 次（本月）`;
+        }
+      }
+
+      const navQuotaEl = document.getElementById('saver-nav-quota');
+      if (navQuotaEl) {
+        if (isCard) {
+          navQuotaEl.textContent = '';
+        } else {
+          const q = snapshot.monthly.navigation;
+          navQuotaEl.textContent = `· 免费剩余 ${q.remaining}/${q.limit} 次（本月）`;
+        }
+      }
+
+      const tplQuotaEl = document.getElementById('saver-template-quota');
+      const addTplBtn = document.getElementById('saver-ctx-template-add');
+      if (tplQuotaEl) {
+        if (isCard) {
+          tplQuotaEl.textContent = '';
+        } else {
+          const t = snapshot.template;
+          tplQuotaEl.textContent = `免费可新建：${t.remaining}/${t.limit}`;
+        }
+      }
+      if (addTplBtn) {
+        if (isCard) {
+          addTplBtn.disabled = false;
+          addTplBtn.style.opacity = '';
+          addTplBtn.style.cursor = 'pointer';
+        } else {
+          const allowed = snapshot.template?.allowed === true;
+          addTplBtn.disabled = !allowed;
+          addTplBtn.style.opacity = allowed ? '' : '0.5';
+          addTplBtn.style.cursor = allowed ? 'pointer' : 'not-allowed';
+        }
+      }
     },
 
     async _refreshSavedCount() {
@@ -1969,6 +2035,7 @@
           if (removed) {
             await this._refreshCtxTemplateList();
             this.showToast('✅ 模板已删除', 'success');
+            this.refreshFeatureQuotaIndicators();
           } else {
             this.showToast('❌ 删除失败', 'error');
           }
@@ -2048,8 +2115,14 @@
         }
 
         if (createMode) {
-          await ContextPromptTemplates.createCustomTemplate(payload);
-          this.showToast('✅ 新模板已创建', 'success');
+          try {
+            await ContextPromptTemplates.createCustomTemplate(payload);
+            this.showToast('✅ 新模板已创建', 'success');
+          } catch (e) {
+            this.showToast(`❌ ${e.message || '创建失败'}`, 'error');
+            this.refreshFeatureQuotaIndicators();
+            return;
+          }
         } else {
           await ContextPromptTemplates.updateTemplate(editingTpl.id, payload);
           this.showToast('✅ 模板已更新', 'success');
@@ -2057,6 +2130,7 @@
 
         ContextPromptTemplates._renderSelect();
         await this._refreshCtxTemplateList();
+        this.refreshFeatureQuotaIndicators();
         close();
       };
 
@@ -2339,6 +2413,21 @@
       return [...this.templates];
     },
 
+    getCustomTemplateCount() {
+      return this.templates.filter(t => !t.builtin).length;
+    },
+
+    getTemplateCreateInfo() {
+      const quotaManager = window.ChatGPTSaver?.FeatureQuotaManager;
+      const customCount = this.getCustomTemplateCount();
+      if (quotaManager?.getTemplateCreateSnapshot) {
+        return quotaManager.getTemplateCreateSnapshot(customCount);
+      }
+      const limit = 2;
+      const remaining = Math.max(0, limit - customCount);
+      return { limit, used: customCount, remaining, allowed: remaining > 0 };
+    },
+
     async selectTemplate(templateId) {
       const found = this._findTemplateById(templateId);
       if (!found) return;
@@ -2351,6 +2440,11 @@
     },
 
     async createCustomTemplate(payload) {
+      const createInfo = this.getTemplateCreateInfo();
+      if (!createInfo.allowed) {
+        throw new Error(`免费版最多创建 ${createInfo.limit} 个自定义模板`);
+      }
+
       const now = new Date().toISOString();
       const t = {
         id: `custom-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
@@ -2731,6 +2825,15 @@
           const fileInfo = this._cachedFiles[idx];
           if (!fileInfo) return;
           try {
+            const quotaManager = window.ChatGPTSaver?.FeatureQuotaManager;
+            if (quotaManager?.canUse) {
+              const gate = await quotaManager.canUse('continuation', 1);
+              if (!gate.success) {
+                UI.showToast(`❌ ${gate.message || '延续额度不足'}`, 'error', 3000);
+                UI.refreshFeatureQuotaIndicators?.();
+                return;
+              }
+            }
             UI.showToast('📎 正在导入上下文...', 'saving', 0);
             // 收集所有上下文 JSON 文件
             const ctxHandles = fileInfo.allContextHandles || [fileInfo.handle];
@@ -2793,17 +2896,30 @@
       const prompt = ContextPromptTemplates.buildPrompt(title, totalMsgCount, ctxArr, attFiles);
 
       const input = document.querySelector('#prompt-textarea, [contenteditable="true"][data-placeholder]');
-      if (input) {
-        if (input.getAttribute('contenteditable') === 'true') {
-          const p = input.querySelector('p') || input;
-          p.textContent = prompt;
-          input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));
-        } else {
-          const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
-          if (setter) { setter.call(input, prompt); input.dispatchEvent(new Event('input', { bubbles: true })); }
-        }
-        input.focus();
+      if (!input) {
+        throw new Error('未找到输入框，无法注入延续提示词');
       }
+      if (input.getAttribute('contenteditable') === 'true') {
+        const p = input.querySelector('p') || input;
+        p.textContent = prompt;
+        input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));
+      } else {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+        if (setter) {
+          setter.call(input, prompt);
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      }
+      input.focus();
+
+      const quotaManager = window.ChatGPTSaver?.FeatureQuotaManager;
+      if (quotaManager?.consume) {
+        const consumed = await quotaManager.consume('continuation', 1);
+        if (!consumed.success) {
+          throw new Error(consumed.message || '延续额度不足');
+        }
+      }
+      UI.refreshFeatureQuotaIndicators?.();
       const totalFiles = ctxArr.length + attFiles.length;
       UI.showToast(`✅ 已导入 ${totalFiles} 个文件，请发送消息`, 'success', 3000);
     }
@@ -2909,15 +3025,27 @@
       this.render();
     },
 
-    _scrollToMessage(messageId, indexHint = null) {
+    async _scrollToMessage(messageId, indexHint = null) {
       let target = this._messages.find(m => m.messageId === messageId);
       if (!target && Number.isInteger(indexHint)) {
         target = this._messages.find(m => m.index === indexHint);
       }
       if (!target || !target.element) return;
+
+      const quotaManager = window.ChatGPTSaver?.FeatureQuotaManager;
+      if (quotaManager?.consume) {
+        const consumed = await quotaManager.consume('navigation', 1);
+        if (!consumed.success) {
+          UI.showToast(`❌ ${consumed.message || '导航额度不足'}`, 'error', 3000);
+          UI.refreshFeatureQuotaIndicators?.();
+          return;
+        }
+      }
+
       target.element.scrollIntoView({ behavior: 'smooth', block: 'center' });
       target.element.classList.add('saver-nav-highlight');
       setTimeout(() => target.element?.classList?.remove('saver-nav-highlight'), 2200);
+      UI.refreshFeatureQuotaIndicators?.();
     },
 
     _bindSearch() {
@@ -2926,13 +3054,13 @@
       const input = document.getElementById('saver-nav-search');
       if (!input) return;
       input.addEventListener('input', () => this.render());
-      input.addEventListener('keydown', (e) => {
-        if (e.key !== 'Enter') return;
-        const q = (input.value || '').trim().toLowerCase();
-        if (!q) return;
-        const hit = this._messages.find(m => m.snippet.toLowerCase().includes(q));
-        if (hit) this._scrollToMessage(hit.messageId, hit.index);
-      });
+        input.addEventListener('keydown', (e) => {
+          if (e.key !== 'Enter') return;
+          const q = (input.value || '').trim().toLowerCase();
+          if (!q) return;
+          const hit = this._messages.find(m => m.snippet.toLowerCase().includes(q));
+          if (hit) void this._scrollToMessage(hit.messageId, hit.index);
+        });
     },
 
     _bindContainerObserver() {
@@ -3001,7 +3129,7 @@
           if (e.target?.closest('.saver-nav-fav-btn')) return;
           const messageId = row.getAttribute('data-nav-message-id');
           const indexHint = Number(row.getAttribute('data-nav-index'));
-          this._scrollToMessage(messageId, indexHint);
+          void this._scrollToMessage(messageId, indexHint);
         };
       });
 
@@ -3058,7 +3186,7 @@
             UI.showToast('请先切换到对应对话，再点击收藏定位', 'info', 2500);
             return;
           }
-          this._scrollToMessage(messageId, indexHint);
+          void this._scrollToMessage(messageId, indexHint);
         };
       });
     }
@@ -3069,6 +3197,7 @@
   let saveDebounceTimer = null;
   let refreshPromptShown = false;
   let accessWatchTimer = null;
+  let messageListenerInitialized = false;
 
   async function init() {
     if (isInitialized) return;
@@ -3078,16 +3207,14 @@
 
     // 先初始化 UI（按钮 + 面板 + toast）
     UI.init();
+    setupMessageListener();
 
-    // 统一访问控制（卡密 + 游客）
-    const accessGranted = await AccessManager.init(CardKeyManager);
-    if (!accessGranted) {
-      console.log('[ChatGPT Saver] 当前不可用，等待激活或游客登录');
-      UI.showCardKeyOverlay(AccessManager.getUnavailableMessage());
-      return;
+    // 统一访问控制（卡密 / 免费模式）
+    await AccessManager.init(CardKeyManager);
+    if (window.ChatGPTSaver?.FeatureQuotaManager?.init) {
+      await window.ChatGPTSaver.FeatureQuotaManager.init();
     }
 
-    // 已授权，继续初始化
     await initAfterCardKey();
   }
 
@@ -3097,28 +3224,21 @@
     UI.initCardKeyBadgeClick();
     await UsageMonitor.init();
     AttachmentManager.init();
-    ContextPromptTemplates.init();
+    await ContextPromptTemplates.init();
     await ChatNavigator.init();
     await tryRestoreFileAccess();
-    setupMessageListener();
     if (config.autoSave) startAutoSave();
     window.ChatGPTSaver.URLObserver.start(handleURLChange);
     isInitialized = true;
     UI.updateStatus();
     UI.updateUsage();
+    UI.refreshFeatureQuotaIndicators();
 
     if (accessWatchTimer) clearInterval(accessWatchTimer);
     accessWatchTimer = setInterval(() => {
-      const usable = AccessManager.canUseNow();
+      AccessManager.canUseNow();
       UI.updateCardKeyBadge();
-      if (usable) return;
-      if (window.ChatGPTSaver.Observer?.isActive?.()) {
-        window.ChatGPTSaver.Observer.stop();
-      }
-      if (!AccessManager.wasExpiryNotified()) {
-        AccessManager.markExpiryNotified();
-        UI.showCardKeyOverlay(AccessManager.getUnavailableMessage());
-      }
+      UI.refreshFeatureQuotaIndicators();
     }, 60 * 1000);
 
     console.log('ChatGPT 对话保存助手初始化完成');
@@ -3161,15 +3281,20 @@
   }
 
   function setupMessageListener() {
+    if (messageListenerInitialized) return;
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       handleMessage(request, sender, sendResponse);
       return true;
     });
+    messageListenerInitialized = true;
   }
 
   async function handleMessage(request, sender, sendResponse) {
     try {
       switch (request.action) {
+        case 'togglePanel':
+          sendResponse(UI.handlePanelToggleRequest());
+          break;
         case 'requestFolderAccess':
           sendResponse(await window.ChatGPTSaver.FileSystem.requestFolderAccess());
           break;

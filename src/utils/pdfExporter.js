@@ -6,7 +6,7 @@ const PDFExporter = {
   // 最大重试次数
   maxRetries: 2,
   unicodeFontName: 'NotoSansSC',
-  unicodeFontFile: 'ChatGPTSaver-NotoSansSC-Regular.ttf',
+  unicodeFontFile: 'ChatGPTSaver-NotoSansSC-Regular.otf',
   unicodeFontBinary: null,
   unicodeFontLoadingPromise: null,
   unicodeFontEnabled: false,
@@ -78,19 +78,16 @@ const PDFExporter = {
           ? manifest.web_accessible_resources
           : [];
         const listedInManifest = webResources.some((entry) =>
-          Array.isArray(entry?.resources) && entry.resources.includes('src/lib/NotoSansSC-Regular.ttf')
+          Array.isArray(entry?.resources) && entry.resources.includes('src/lib/NotoSansSC-Regular.otf')
         );
         // 仅当 manifest 明确暴露字体资源时才尝试本地扩展 URL，避免控制台出现权限拦截噪音
         if (listedInManifest) {
-          candidates.push(chrome.runtime.getURL('src/lib/NotoSansSC-Regular.ttf'));
+          candidates.push(chrome.runtime.getURL('src/lib/NotoSansSC-Regular.otf'));
         }
       }
     } catch (e) {
       // ignore
     }
-    candidates.push(
-      'https://cdn.jsdelivr.net/gh/googlefonts/noto-cjk@main/Sans/TTF/SimplifiedChinese/NotoSansSC-Regular.ttf'
-    );
 
     this.unicodeFontLoadingPromise = (async () => {
       for (const url of candidates) {

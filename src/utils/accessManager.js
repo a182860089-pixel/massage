@@ -1,31 +1,24 @@
 /**
- * AccessManager - 统一访问控制（卡密 + 游客试用）
+ * AccessManager - 统一访问模式管理（卡密激活 / 免费模式）
+ * 说明：
+ * - 未激活卡密也允许使用插件（免费模式）
+ * - 卡密激活用户不受免费额度限制
  */
 
 const AccessManager = {
-  ACCESS_MODE_KEY: 'accessMode',
-  GUEST_TRIAL_KEY: 'guestTrialState',
-  TRIAL_DURATION_MS: 24 * 60 * 60 * 1000,
+  ACCESS_MODE_KEY: 'accessModeV2',
+  LEGACY_ACCESS_MODE_KEY: 'accessMode',
 
   _cardKeyManager: null,
   _state: {
-    accessMode: 'none', // card | guest | none
-    guestTrialState: {
-      used: false,
-      startedAt: null,
-      expiresAt: null,
-      clientId: '',
-      expiredNotified: false
-    }
+    accessMode: 'free' // card | free
   },
   _memStore: {},
 
   async init(cardKeyManager) {
     this._cardKeyManager = cardKeyManager || null;
-
-    const loaded = await this._loadState();
-    this._state.accessMode = loaded.accessMode;
-    this._state.guestTrialState = loaded.guestTrialState;
+    const loadedMode = await this._loadMode();
+    this._state.accessMode = loadedMode;
 
     let cardValid = false;
     if (this._cardKeyManager?.init) {
@@ -38,196 +31,120 @@ const AccessManager = {
 
     if (cardValid && this._cardKeyManager?.canUseNow?.()) {
       this._state.accessMode = 'card';
-      await this._saveState();
-      return true;
+    } else {
+      this._state.accessMode = 'free';
     }
 
-    if (this._isGuestActive()) {
-      this._state.accessMode = 'guest';
-      await this._saveState();
-      return true;
-    }
-
-    this._state.accessMode = 'none';
-    await this._saveState();
-    return false;
+    await this._saveMode();
+    return true;
   },
 
   getAccessMode() {
     return this._state.accessMode;
   },
 
-  async activateGuestTrial(clientId) {
-    const now = Date.now();
-    const state = this._state.guestTrialState || {};
-
+  isCardActive() {
     if (this._cardKeyManager?.canUseNow?.()) {
       this._state.accessMode = 'card';
-      await this._saveState();
-      return { success: true, mode: 'card' };
+      return true;
     }
-
-    // 已使用过且已到期：不再允许重新试用
-    if (state.used && state.expiresAt && now >= Number(state.expiresAt)) {
-      this._state.accessMode = 'none';
-      await this._saveState();
-      return {
-        success: false,
-        message: '试用时间结束，请进行激活'
-      };
-    }
-
-    // 首次试用
-    if (!state.used) {
-      const startedAt = now;
-      const expiresAt = now + this.TRIAL_DURATION_MS;
-      this._state.guestTrialState = {
-        used: true,
-        startedAt,
-        expiresAt,
-        clientId: String(clientId || ''),
-        expiredNotified: false
-      };
-    }
-
-    this._state.accessMode = 'guest';
-    await this._saveState();
-    return { success: true, mode: 'guest' };
+    return this._state.accessMode === 'card';
   },
 
   async onCardActivated() {
     this._state.accessMode = 'card';
-    await this._saveState();
+    await this._saveMode();
   },
 
   async clearCardAccessFallback() {
-    if (this._isGuestActive()) {
-      this._state.accessMode = 'guest';
-    } else {
-      this._state.accessMode = 'none';
-    }
-    await this._saveState();
+    this._state.accessMode = 'free';
+    await this._saveMode();
   },
 
   canUseNow() {
     if (this._cardKeyManager?.canUseNow?.()) {
       this._state.accessMode = 'card';
-      return true;
+    } else {
+      this._state.accessMode = 'free';
     }
-
-    if (this._isGuestActive()) {
-      this._state.accessMode = 'guest';
-      return true;
-    }
-
-    this._state.accessMode = 'none';
-    return false;
-  },
-
-  getGuestRemainingMs() {
-    const expiresAt = Number(this._state.guestTrialState?.expiresAt || 0);
-    if (!expiresAt) return 0;
-    return Math.max(0, expiresAt - Date.now());
-  },
-
-  hasGuestTrialExpired() {
-    const state = this._state.guestTrialState || {};
-    if (!state.used || !state.expiresAt) return false;
-    return Date.now() >= Number(state.expiresAt);
-  },
-
-  hasUsedGuestTrial() {
-    return this._state.guestTrialState?.used === true;
-  },
-
-  wasExpiryNotified() {
-    return this._state.guestTrialState?.expiredNotified === true;
-  },
-
-  async markExpiryNotified() {
-    if (!this._state.guestTrialState) return;
-    this._state.guestTrialState.expiredNotified = true;
-    await this._saveState();
+    return true;
   },
 
   getUnavailableMessage() {
-    if (this._cardKeyManager?.canUseNow?.()) {
-      return '';
-    }
-
-    if (this.hasGuestTrialExpired()) {
-      return '试用时间结束，请进行激活';
-    }
-
-    if (!this.hasUsedGuestTrial()) {
-      return '请选择激活方式：卡密激活或游客登录';
-    }
-
-    return this._cardKeyManager?.getUnavailableMessage?.() || '请先激活卡密后使用';
+    return '';
   },
 
   getBadgeInfo() {
-    if (this._cardKeyManager?.canUseNow?.()) {
+    if (this.isCardActive()) {
       return { type: 'card' };
     }
-
-    if (this._isGuestActive()) {
-      const remainMs = this.getGuestRemainingMs();
-      const hours = Math.max(1, Math.ceil(remainMs / (60 * 60 * 1000)));
-      return {
-        type: 'guest',
-        text: `🆓 游客剩余 ${hours} 小时`,
-        color: hours <= 3 ? '#ef4444' : '#10a37f'
-      };
-    }
-
-    return { type: 'none' };
-  },
-
-  _isGuestActive() {
-    const state = this._state.guestTrialState || {};
-    if (!state.used || !state.startedAt || !state.expiresAt) return false;
-    const now = Date.now();
-    return now < Number(state.expiresAt);
-  },
-
-  async _loadState() {
-    const defaults = {
-      accessMode: 'none',
-      guestTrialState: {
-        used: false,
-        startedAt: null,
-        expiresAt: null,
-        clientId: '',
-        expiredNotified: false
-      }
+    return {
+      type: 'free',
+      text: '🆓 免费版',
+      color: '#10a37f'
     };
+  },
 
+  // 向后兼容旧接口（游客模式已取消）
+  async activateGuestTrial() {
+    this._state.accessMode = 'free';
+    await this._saveMode();
+    return {
+      success: false,
+      mode: 'free',
+      message: '游客模式已取消，请使用卡密激活高级版'
+    };
+  },
+
+  getGuestRemainingMs() {
+    return 0;
+  },
+
+  hasGuestTrialExpired() {
+    return false;
+  },
+
+  hasUsedGuestTrial() {
+    return false;
+  },
+
+  wasExpiryNotified() {
+    return false;
+  },
+
+  async markExpiryNotified() {
+    // no-op
+  },
+
+  async _loadMode() {
     try {
       if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-        const result = await chrome.storage.local.get([this.ACCESS_MODE_KEY, this.GUEST_TRIAL_KEY]);
-        const accessMode = this._normalizeAccessMode(result[this.ACCESS_MODE_KEY]);
-        const guestTrialState = this._normalizeGuestState(result[this.GUEST_TRIAL_KEY]);
-        return { accessMode, guestTrialState };
+        const result = await chrome.storage.local.get([
+          this.ACCESS_MODE_KEY,
+          this.LEGACY_ACCESS_MODE_KEY
+        ]);
+        const v2Mode = this._normalizeAccessMode(result[this.ACCESS_MODE_KEY]);
+        if (v2Mode) return v2Mode;
+
+        const legacyMode = String(result[this.LEGACY_ACCESS_MODE_KEY] || '').toLowerCase();
+        if (legacyMode === 'card') return 'card';
+        return 'free';
       }
     } catch (e) {
       // ignore
     }
 
-    const accessMode = this._normalizeAccessMode(this._memStore[this.ACCESS_MODE_KEY]);
-    const guestTrialState = this._normalizeGuestState(this._memStore[this.GUEST_TRIAL_KEY]);
-    return {
-      accessMode: accessMode || defaults.accessMode,
-      guestTrialState: guestTrialState || defaults.guestTrialState
-    };
+    const mode = this._normalizeAccessMode(this._memStore[this.ACCESS_MODE_KEY]);
+    if (mode) return mode;
+    const legacy = String(this._memStore[this.LEGACY_ACCESS_MODE_KEY] || '').toLowerCase();
+    return legacy === 'card' ? 'card' : 'free';
   },
 
-  async _saveState() {
+  async _saveMode() {
+    const mode = this._state.accessMode === 'card' ? 'card' : 'free';
     const payload = {
-      [this.ACCESS_MODE_KEY]: this._normalizeAccessMode(this._state.accessMode),
-      [this.GUEST_TRIAL_KEY]: this._normalizeGuestState(this._state.guestTrialState)
+      [this.ACCESS_MODE_KEY]: mode
     };
-
     try {
       if (typeof chrome !== 'undefined' && chrome.storage?.local) {
         await chrome.storage.local.set(payload);
@@ -236,38 +153,20 @@ const AccessManager = {
     } catch (e) {
       // ignore
     }
-
-    this._memStore[this.ACCESS_MODE_KEY] = payload[this.ACCESS_MODE_KEY];
-    this._memStore[this.GUEST_TRIAL_KEY] = payload[this.GUEST_TRIAL_KEY];
+    this._memStore[this.ACCESS_MODE_KEY] = mode;
   },
 
   _normalizeAccessMode(value) {
     const mode = String(value || '').toLowerCase();
-    if (mode === 'card' || mode === 'guest' || mode === 'none') return mode;
-    return 'none';
-  },
-
-  _normalizeGuestState(value) {
-    const state = value && typeof value === 'object' ? value : {};
-    const startedAt = this._toValidTs(state.startedAt);
-    const expiresAt = this._toValidTs(state.expiresAt);
-    return {
-      used: state.used === true,
-      startedAt,
-      expiresAt,
-      clientId: String(state.clientId || ''),
-      expiredNotified: state.expiredNotified === true
-    };
-  },
-
-  _toValidTs(value) {
-    const n = Number(value);
-    return Number.isFinite(n) && n > 0 ? n : null;
+    if (mode === 'card' || mode === 'free') return mode;
+    return '';
   }
 };
 
-window.ChatGPTSaver = window.ChatGPTSaver || {};
-window.ChatGPTSaver.AccessManager = AccessManager;
+if (typeof window !== 'undefined') {
+  window.ChatGPTSaver = window.ChatGPTSaver || {};
+  window.ChatGPTSaver.AccessManager = AccessManager;
+}
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = { AccessManager };

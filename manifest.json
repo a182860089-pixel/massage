@@ -1,17 +1,16 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT 对话保存助手",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "自动保存 ChatGPT 对话，支持导出为 HTML、Markdown、PDF 格式",
   "permissions": [
     "storage",
-    "downloads",
-    "activeTab"
+    "downloads"
   ],
   "host_permissions": [
     "https://chat.openai.com/*",
     "https://chatgpt.com/*",
-    "https://seat.20050225.xyz/*"
+    "https://seat.20050225.xyz/api/plugin/card-keys/*"
   ],
   "action": {
     "default_icon": {
@@ -58,6 +57,7 @@
         "src/utils/searchIndex.js",
         "src/utils/templateManager.js",
         "src/utils/accessManager.js",
+        "src/utils/featureQuotaManager.js",
         "src/utils/exporter.js",
         "src/content/parser.js",
         "src/content/observer.js",
@@ -76,6 +76,7 @@
     {
       "resources": [
         "icons/logo.jpg",
+        "src/lib/NotoSansSC-Regular.otf",
         "dist/pdfRender.worker.js"
       ],
       "matches": ["https://chat.openai.com/*", "https://chatgpt.com/*"]

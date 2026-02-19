@@ -885,6 +885,8 @@
           --saver-log-header-loading-bg: #e0f2fe; --saver-log-header-loading-text: #0369a1;
           --saver-log-header-success-bg: #dcfce7; --saver-log-header-success-text: #166534;
           --saver-log-header-error-bg: #fee2e2; --saver-log-header-error-text: #dc2626;
+          --saver-nav-user-bg: #eef2f7; --saver-nav-user-border: #cbd5e1; --saver-nav-user-icon: #334155; --saver-nav-user-title: #111827; --saver-nav-user-meta: #4b5563;
+          --saver-nav-ai-bg: #ffffff; --saver-nav-ai-border: #e5e7eb; --saver-nav-ai-icon: #0f766e; --saver-nav-ai-title: #1f2937; --saver-nav-ai-meta: #6b7280;
         }
         :root.saver-dark {
           --saver-bg: #2d2d2d; --saver-text: #e0e0e0; --saver-sub-text: #aaaaaa;
@@ -897,6 +899,8 @@
           --saver-log-header-loading-bg: #0c4a6e; --saver-log-header-loading-text: #e0f2fe;
           --saver-log-header-success-bg: #064e3b; --saver-log-header-success-text: #dcfce7;
           --saver-log-header-error-bg: #7f1d1d; --saver-log-header-error-text: #fee2e2;
+          --saver-nav-user-bg: #3a3f47; --saver-nav-user-border: #5a6472; --saver-nav-user-icon: #f1f5f9; --saver-nav-user-title: #f8fafc; --saver-nav-user-meta: #cbd5e1;
+          --saver-nav-ai-bg: #31343b; --saver-nav-ai-border: #4a4f57; --saver-nav-ai-icon: #5eead4; --saver-nav-ai-title: #e5e7eb; --saver-nav-ai-meta: #a1a1aa;
         }
         .saver-usage-stats { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; max-height: 250px; overflow-y: auto; }
         .saver-usage-item { background: var(--saver-bg); border: 1px solid var(--saver-border); border-radius: 8px; padding: 8px; text-align: left; }
@@ -1028,6 +1032,21 @@
         .saver-context-item .ctx-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--saver-text); font-weight: 500; }
         .saver-context-item .ctx-meta { font-size: 10px; color: var(--saver-sub-text); margin-top: 2px; }
         .saver-context-item .ctx-drag-hint { font-size: 10px; color: var(--saver-sub-text); opacity: 0.5; flex-shrink: 0; }
+        .saver-context-item.saver-nav-item { cursor: pointer; }
+        .saver-context-item.saver-nav-item.role-user {
+          background: var(--saver-nav-user-bg);
+          border-color: var(--saver-nav-user-border);
+        }
+        .saver-context-item.saver-nav-item.role-user .ctx-icon { color: var(--saver-nav-user-icon); }
+        .saver-context-item.saver-nav-item.role-user .ctx-title { color: var(--saver-nav-user-title); font-weight: 600; }
+        .saver-context-item.saver-nav-item.role-user .ctx-meta { color: var(--saver-nav-user-meta); }
+        .saver-context-item.saver-nav-item.role-assistant {
+          background: var(--saver-nav-ai-bg);
+          border-color: var(--saver-nav-ai-border);
+        }
+        .saver-context-item.saver-nav-item.role-assistant .ctx-icon { color: var(--saver-nav-ai-icon); }
+        .saver-context-item.saver-nav-item.role-assistant .ctx-title { color: var(--saver-nav-ai-title); }
+        .saver-context-item.saver-nav-item.role-assistant .ctx-meta { color: var(--saver-nav-ai-meta); }
         .saver-nav-fav-btn { background: none; border: none; cursor: pointer; color: var(--saver-sub-text); padding: 2px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; line-height: 1; }
         .saver-nav-fav-btn:hover { color: #f59e0b; background: var(--saver-format-active-bg); }
         .saver-nav-fav-btn.active { color: #f59e0b; }
@@ -3213,11 +3232,12 @@
         listEl.innerHTML = '<div class="saver-context-status">没有匹配消息</div>';
       } else {
         listEl.innerHTML = filtered.map(item => {
+          const roleClass = item.role === 'assistant' ? 'role-assistant' : 'role-user';
           const roleIcon = item.role === 'assistant' ? uiIcon('bot', 'sm') : uiIcon('user', 'sm');
           const isFav = this._isFavorite(item.messageId);
           const fav = isFav ? uiIcon('starFilled', 'sm') : uiIcon('star', 'sm');
           return `
-            <div class="saver-context-item" data-nav-message-id="${item.messageId}" data-nav-index="${item.index}" style="cursor:pointer;">
+            <div class="saver-context-item saver-nav-item ${roleClass}" data-nav-message-id="${item.messageId}" data-nav-index="${item.index}">
               <span class="ctx-icon">${roleIcon}</span>
               <div class="ctx-info">
                 <div class="ctx-title">#${item.index + 1}</div>
@@ -3264,7 +3284,7 @@
               </div>
               <div class="saver-ws-children">
                 ${items.map(item => `
-                  <div class="saver-context-item" data-fav-jump-id="${item.messageId}" data-fav-jump-index="${item.indexHint}" data-fav-conv-id="${item.conversationId}" style="cursor:pointer;">
+                  <div class="saver-context-item saver-nav-item ${item.role === 'assistant' ? 'role-assistant' : 'role-user'}" data-fav-jump-id="${item.messageId}" data-fav-jump-index="${item.indexHint}" data-fav-conv-id="${item.conversationId}">
                     <span class="ctx-icon">${item.role === 'assistant' ? uiIcon('bot', 'sm') : uiIcon('user', 'sm')}</span>
                     <div class="ctx-info">
                       <div class="ctx-title">#${(item.indexHint || 0) + 1}</div>

@@ -26,7 +26,8 @@ const PDFExporter = {
       typeof window.ChatGPTSaver.PDFWorkerBridge.isSupported === 'function' &&
       window.ChatGPTSaver.PDFWorkerBridge.isSupported()
     );
-    return legacyReady || v2Ready;
+    const htmlPrintReady = typeof chrome !== 'undefined' && !!chrome.runtime?.sendMessage;
+    return legacyReady || v2Ready || htmlPrintReady;
   },
   
   /**
@@ -37,7 +38,8 @@ const PDFExporter = {
     const hasBridge = !!window.ChatGPTSaver?.PDFWorkerBridge;
     const workerOk = !!window.ChatGPTSaver?.PDFWorkerBridge?.isSupported?.();
     const legacyReady = typeof html2canvas !== 'undefined' && typeof jspdf !== 'undefined';
-    if (legacyReady || (hasBuilder && hasBridge && workerOk)) return null;
+    const htmlPrintReady = typeof chrome !== 'undefined' && !!chrome.runtime?.sendMessage;
+    if (legacyReady || (hasBuilder && hasBridge && workerOk) || htmlPrintReady) return null;
 
     const reasons = [];
     if (typeof html2canvas === 'undefined') reasons.push('html2canvas 库未加载');
@@ -45,7 +47,84 @@ const PDFExporter = {
     if (!hasBuilder) reasons.push('PDFASTBuilder 未加载');
     if (!hasBridge) reasons.push('PDFWorkerBridge 未加载');
     if (hasBridge && !workerOk) reasons.push('Worker 环境不可用');
+    if (!htmlPrintReady) reasons.push('Background printToPDF 通道不可用');
     return reasons.join(' | ');
+  },
+
+  _base64ToBlob(base64, mimeType = 'application/pdf') {
+    const clean = String(base64 || '').trim();
+    if (!clean) return null;
+    const binary = atob(clean);
+    const chunkSize = 0x8000;
+    const parts = [];
+    for (let offset = 0; offset < binary.length; offset += chunkSize) {
+      const slice = binary.slice(offset, offset + chunkSize);
+      const bytes = new Uint8Array(slice.length);
+      for (let i = 0; i < slice.length; i++) {
+        bytes[i] = slice.charCodeAt(i);
+      }
+      parts.push(bytes);
+    }
+    return new Blob(parts, { type: mimeType });
+  },
+
+  _requestHtmlPrintPdf(html, printOptions = {}) {
+    return new Promise((resolve) => {
+      try {
+        chrome.runtime.sendMessage(
+          {
+            action: 'printToPdfFromHtml',
+            html,
+            options: printOptions
+          },
+          (response) => {
+            if (chrome.runtime?.lastError) {
+              resolve({
+                success: false,
+                error: chrome.runtime.lastError.message || 'runtime message failed'
+              });
+              return;
+            }
+            resolve(response || { success: false, error: 'empty response' });
+          }
+        );
+      } catch (error) {
+        resolve({
+          success: false,
+          error: error?.message || String(error)
+        });
+      }
+    });
+  },
+
+  async exportHtmlPrint(options = {}) {
+    if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return null;
+    const parser = window.ChatGPTSaver?.Parser;
+    const htmlExporter = window.ChatGPTSaver?.HTMLExporter;
+    if (!parser || !htmlExporter || typeof htmlExporter.exportConversation !== 'function') return null;
+
+    const conversation = parser.parseConversation();
+    if (!conversation?.messages?.length) return null;
+    const html = htmlExporter.exportConversation(conversation);
+    if (!html) return null;
+
+    const onProgress = typeof options.onProgress === 'function' ? options.onProgress : () => {};
+    onProgress(0, 1, { stage: 'html-print', message: '准备 HTML 原样打印' });
+
+    try {
+      const result = await this._requestHtmlPrintPdf(html, options.printOptions || {});
+      if (!result?.success || !result?.data) {
+        console.warn('[PDF] html_print 导出失败:', result?.error || 'unknown');
+        return null;
+      }
+      const blob = this._base64ToBlob(result.data, result.mimeType || 'application/pdf');
+      if (!blob) return null;
+      onProgress(1, 1, { stage: 'html-print', message: 'HTML 原样打印完成' });
+      return blob;
+    } catch (error) {
+      console.error('[PDF] html_print 导出异常:', error);
+      return null;
+    }
   },
 
   _containsNonAscii(text) {
@@ -507,6 +586,16 @@ const PDFExporter = {
     }
     
     return safe.trim() + (text.length > maxLength ? '...' : '');
+  },
+
+  normalizePdfGlyphs(text) {
+    return String(text || '')
+      .replace(/[\u{10000}-\u{10FFFF}]/gu, '')
+      .replace(/[•▪◦]/g, '·')
+      .replace(/[✅✔✓☑️]/g, '[OK]')
+      .replace(/[❌✖✕]/g, '[X]')
+      .replace(/[⭐★]/g, '*')
+      .replace(/[🔥]/g, '!');
   },
   
   /**
@@ -1193,7 +1282,7 @@ const PDFExporter = {
   },
 
   _writeParagraph(ctx, text, options = {}) {
-    const content = String(text || '').replace(/\r/g, '').trim();
+    const content = this.normalizePdfGlyphs(String(text || '')).replace(/\r/g, '').trim();
     if (!content) return;
 
     const fontSize = Number(options.fontSize || 11);
@@ -1221,7 +1310,7 @@ const PDFExporter = {
   },
 
   _writeCodeBlock(ctx, text) {
-    const codeText = String(text || '').replace(/\r/g, '').trim();
+    const codeText = this.normalizePdfGlyphs(String(text || '')).replace(/\r/g, '').trim();
     if (!codeText) return;
     const lines = codeText.split('\n');
     const useUnicode = this._containsNonAscii(codeText) && !!ctx.unicodeFontReady;
@@ -1527,9 +1616,18 @@ const PDFExporter = {
       options = optionsOrProgress;
     }
 
-    const mode = options.mode === 'visual' ? 'visual' : 'structured';
+    const rawMode = String(options.mode || '').toLowerCase();
+    const mode = rawMode === 'visual'
+      ? 'visual'
+      : (rawMode === 'html_print' ? 'html_print' : 'structured');
+
     if (mode === 'visual') {
       return this.exportVisual(options);
+    }
+    if (mode === 'html_print') {
+      const htmlPrint = await this.exportHtmlPrint(options);
+      if (htmlPrint) return htmlPrint;
+      console.warn('[PDF] html_print 模式失败，已自动回退 structured 模式');
     }
 
     const structuredV2 = await this.exportStructuredV2(options);

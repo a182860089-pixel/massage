@@ -6,6 +6,28 @@ import { renderImageBlock } from '../pdf-v2/renderers/imageRenderer.mjs';
 import { renderTableBlock } from '../pdf-v2/renderers/tableRenderer.mjs';
 import notoSansScRegular from '../lib/NotoSansSC-Regular.otf';
 
+const NON_BMP_RE = /[\u{10000}-\u{10FFFF}]/gu;
+const CJK_RE = /[\u3400-\u9FFF\uF900-\uFAFF]/;
+const SYMBOL_REPLACEMENTS = [
+  [/[•▪◦]/g, '·'],
+  [/[✅✔✓☑️]/g, '[OK]'],
+  [/[❌✖✕]/g, '[X]'],
+  [/[⭐★]/g, '*'],
+  [/[🔥]/g, '!']
+];
+
+function normalizePdfGlyphs(value) {
+  let text = String(value || '');
+  if (!text) return '';
+
+  // Extension bundled NotoSansSC does not cover many emoji/symbol glyphs.
+  text = text.replace(NON_BMP_RE, '');
+  SYMBOL_REPLACEMENTS.forEach(([pattern, replacement]) => {
+    text = text.replace(pattern, replacement);
+  });
+  return text;
+}
+
 let _fontRegistered = false;
 function ensureFontsRegistered() {
   if (_fontRegistered) return;
@@ -13,8 +35,18 @@ function ensureFontsRegistered() {
     family: 'NotoSansSC',
     src: notoSansScRegular
   });
-  // 禁用默认英文断词，降低中英混排错切概率
-  Font.registerHyphenationCallback((word) => [word]);
+  // Keep long mixed-language technical tokens breakable to avoid right overflow.
+  Font.registerHyphenationCallback((word) => {
+    const token = normalizePdfGlyphs(word);
+    if (!token) return [''];
+    if (CJK_RE.test(token)) return token.split('');
+    if (token.length >= 28) {
+      const byPunctuation = token.split(/([/_\-.:]+)/).filter(Boolean);
+      if (byPunctuation.length > 1) return byPunctuation;
+      return token.split('');
+    }
+    return [token];
+  });
   _fontRegistered = true;
 }
 
@@ -221,7 +253,7 @@ const styles = StyleSheet.create({
 });
 
 function safeText(value, maxLen = 2000) {
-  const normalized = String(value || '').replace(/\s+/g, ' ').trim();
+  const normalized = normalizePdfGlyphs(value).replace(/\s+/g, ' ').trim();
   if (!normalized) return '';
   return normalized.length > maxLen ? `${normalized.slice(0, maxLen - 1)}...` : normalized;
 }
@@ -261,7 +293,7 @@ function renderListBlock(block) {
       React.createElement(
         Text,
         { style: styles.listItem, key: `list-item-${idx}` },
-        `${ordered ? `${idx + 1}.` : '•'} ${safeText(item, 8000)}`
+        `${ordered ? `${idx + 1}.` : '·'} ${safeText(item, 8000)}`
       )
     )
   );

@@ -5,7 +5,9 @@
   "description": "自动保存 ChatGPT 对话，支持导出为 HTML、Markdown、PDF 格式",
   "permissions": [
     "storage",
-    "downloads"
+    "downloads",
+    "debugger",
+    "alarms"
   ],
   "host_permissions": [
     "https://chat.openai.com/*",

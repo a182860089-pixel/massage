@@ -3,6 +3,13 @@
  */
 
 const Exporter = {
+  normalizePdfMode(mode) {
+    const raw = String(mode || '').trim().toLowerCase();
+    if (raw === 'visual') return 'visual';
+    if (raw === 'html_print') return 'html_print';
+    return 'structured';
+  },
+
   /**
    * 记录日志（同时输出到控制台和日志收集器）
    */
@@ -18,7 +25,7 @@ const Exporter = {
    * @param {Object} formats - 导出格式配置
    * @param {boolean} forceExport - 是否强制导出（跳过更新检查）
    * @param {Object} options - 其他参数
-   * @param {'structured'|'visual'} options.pdfMode - PDF 导出模式
+   * @param {'structured'|'visual'|'html_print'} options.pdfMode - PDF 导出模式
    */
   async exportConversation(formats = { html: true, md: true, pdf: true, json: true }, forceExport = false, options = {}) {
     const parser = window.ChatGPTSaver.Parser;
@@ -132,8 +139,11 @@ const Exporter = {
           const reason = window.ChatGPTSaver.PDFExporter.getUnavailableReason();
           this.log(`⚠️ PDF 导出不可用: ${reason}`);
         } else {
-          const pdfMode = options.pdfMode === 'visual' ? 'visual' : 'structured';
-          this.log(`🧭 PDF 模式: ${pdfMode === 'structured' ? '结构化' : '视觉还原'}`);
+          const pdfMode = this.normalizePdfMode(options.pdfMode);
+          const modeLabel = pdfMode === 'html_print'
+            ? 'HTML原样'
+            : (pdfMode === 'visual' ? '视觉还原' : '结构化');
+          this.log(`🧭 PDF 模式: ${modeLabel}`);
           // 进度回调节流，避免频繁日志与 toast 触发重排
           let lastEmitTime = 0;
           let lastPct = -1;

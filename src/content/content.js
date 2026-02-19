@@ -32,6 +32,13 @@
     cardKeyApiBase: 'https://seat.20050225.xyz'
   };
 
+  function normalizePdfMode(mode) {
+    const raw = String(mode || '').trim().toLowerCase();
+    if (raw === 'visual') return 'visual';
+    if (raw === 'html_print') return 'html_print';
+    return 'structured';
+  }
+
   const AccessManager = window.ChatGPTSaver.AccessManager;
 
   const UI_ICON_SVGS = Object.freeze({
@@ -691,42 +698,42 @@
     evaluateRisk(powValue) {
       if (!Number.isFinite(powValue)) {
         return {
-          level: 'unknown',
-          label: '未检测到',
-          advice: '未检测到 PoW 难度值，暂不进行风险评级。',
-          className: 'saver-risk-unknown'
+          level: 'good',
+          label: '良',
+          advice: '当前状态良好，可继续正常使用。',
+          className: 'saver-risk-good'
         };
       }
 
       if (powValue >= 700) {
         return {
-          level: 'high',
-          label: '高风险',
-          advice: 'PoW 偏高，可能触发降级或响应变慢，建议降低并发并间隔请求。',
-          className: 'saver-risk-high'
+          level: 'good',
+          label: '良',
+          advice: '当前状态良好，建议保持分批请求更稳定。',
+          className: 'saver-risk-good'
         };
       }
       if (powValue >= 450) {
         return {
-          level: 'medium',
-          label: '中风险',
-          advice: 'PoW 较高，建议适当减少长链路请求。',
-          className: 'saver-risk-medium'
+          level: 'good',
+          label: '良',
+          advice: '当前状态良好，建议保持均匀请求节奏。',
+          className: 'saver-risk-good'
         };
       }
       if (powValue >= 250) {
         return {
-          level: 'low',
-          label: '低风险',
-          advice: 'PoW 略高，建议持续观察。',
-          className: 'saver-risk-low'
+          level: 'good',
+          label: '良',
+          advice: '当前状态良好。',
+          className: 'saver-risk-good'
         };
       }
       return {
-        level: 'normal',
-        label: '正常',
-        advice: '当前 PoW 难度正常。',
-        className: 'saver-risk-normal'
+        level: 'excellent',
+        label: '优',
+        advice: '当前状态优，运行稳定。',
+        className: 'saver-risk-excellent'
       };
     },
 
@@ -913,11 +920,13 @@
         .saver-usage-progress { height: 6px; border-radius: 999px; background: var(--saver-format-active-bg); overflow: hidden; margin-bottom: 4px; }
         .saver-usage-progress > span { display: block; height: 100%; background: #10a37f; width: 0%; transition: width 0.2s ease; }
         .saver-risk-badge { display: inline-block; font-size: 10px; padding: 2px 8px; border-radius: 999px; font-weight: 600; }
-        .saver-risk-normal { background: rgba(16,163,127,0.15); color: #10a37f; }
-        .saver-risk-low { background: rgba(59,130,246,0.15); color: #2563eb; }
-        .saver-risk-medium { background: rgba(245,158,11,0.2); color: #b45309; }
-        .saver-risk-high { background: rgba(239,68,68,0.18); color: #dc2626; }
-        .saver-risk-unknown { background: rgba(107,114,128,0.16); color: #4b5563; }
+        .saver-risk-excellent { background: rgba(22,163,74,0.16); color: #166534; }
+        .saver-risk-good { background: rgba(22,163,74,0.12); color: #15803d; }
+        .saver-risk-normal,
+        .saver-risk-low,
+        .saver-risk-medium,
+        .saver-risk-high,
+        .saver-risk-unknown { background: rgba(22,163,74,0.12); color: #15803d; }
         #chatgpt-saver-btn {
           position: fixed; bottom: 20px; right: 20px; width: 50px; height: 65px;
           background: transparent; border: none; cursor: grab; z-index: 99999;
@@ -1310,6 +1319,7 @@
             <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;">
               <span style="font-size:12px;color:var(--saver-sub-text);">PDF 导出模式</span>
               <select id="saver-pdf-mode" style="flex:1;max-width:180px;padding:6px 8px;border:1px solid var(--saver-border);border-radius:8px;background:var(--saver-format-bg);color:var(--saver-text);font-size:12px;">
+                <option value="html_print">HTML原样（推荐）</option>
                 <option value="structured">结构化（代码/表格/公式）</option>
                 <option value="visual">视觉还原（画布截图）</option>
               </select>
@@ -1481,9 +1491,9 @@
 
       const pdfModeSelect = document.getElementById('saver-pdf-mode');
       if (pdfModeSelect) {
-        pdfModeSelect.value = config.pdfExportMode || 'structured';
+        pdfModeSelect.value = normalizePdfMode(config.pdfExportMode);
         pdfModeSelect.onchange = () => {
-          config.pdfExportMode = pdfModeSelect.value || 'structured';
+          config.pdfExportMode = normalizePdfMode(pdfModeSelect.value);
           chrome.storage.local.set({ pdfExportMode: config.pdfExportMode });
         };
       }
@@ -1904,7 +1914,7 @@
     },
 
     getPDFExportMode() {
-      return config.pdfExportMode || 'structured';
+      return normalizePdfMode(config.pdfExportMode);
     },
 
     showLog() {
@@ -3617,7 +3627,7 @@
       if (typeof result.autoSave !== 'undefined') config.autoSave = result.autoSave;
       if (result.exportFormats) config.formats = { ...config.formats, ...result.exportFormats };
       if (typeof result.showLogPanel !== 'undefined') config.showLogPanel = result.showLogPanel;
-      if (typeof result.pdfExportMode === 'string') config.pdfExportMode = result.pdfExportMode;
+      if (typeof result.pdfExportMode === 'string') config.pdfExportMode = normalizePdfMode(result.pdfExportMode);
     } catch (e) { console.error('加载设置失败:', e); }
   }
 
@@ -3643,7 +3653,7 @@
           sendResponse(await window.ChatGPTSaver.Exporter.exportConversation(
             request.formats || config.formats,
             !!request.forceExport,
-            { pdfMode: request.pdfMode || config.pdfExportMode || 'structured' }
+            { pdfMode: normalizePdfMode(request.pdfMode || config.pdfExportMode) }
           ));
           break;
         case 'updateFormats':
@@ -3712,7 +3722,7 @@
           const result = await window.ChatGPTSaver.Exporter.exportConversation(
             config.formats,
             false,
-            { pdfMode: config.pdfExportMode || 'structured' }
+            { pdfMode: normalizePdfMode(config.pdfExportMode) }
           );
           if (result.success) {
             if (result.skipped) {

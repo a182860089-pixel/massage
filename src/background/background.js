@@ -6,19 +6,55 @@ import '../utils/clientConfigCache.js';
 
 const CLIENT_CONFIG_URL = 'https://seat.20050225.xyz/api/plugin/card-keys/client-config';
 const BASE_API_URL = 'https://seat.20050225.xyz';
+const DEBUGGER_PROTOCOL_VERSION = '1.3';
+const CLIENT_CONFIG_REFRESH_PERIOD_MS = 6 * 60 * 60 * 1000;
+const CLIENT_CONFIG_REFRESH_PERIOD_MINUTES = CLIENT_CONFIG_REFRESH_PERIOD_MS / (60 * 1000);
+const CLIENT_CONFIG_REFRESH_ALARM = 'chatgptSaverClientConfigAutoRefreshV1';
 
 const clientConfigCacheApi = globalThis.ChatGPTSaver?.ClientConfigCache;
 const clientConfigCache = clientConfigCacheApi?.createClientConfigCache
   ? clientConfigCacheApi.createClientConfigCache({
-      ttlMs: 10 * 60 * 1000,
+      ttlMs: CLIENT_CONFIG_REFRESH_PERIOD_MS,
       cacheKey: 'pluginClientConfigCacheV1',
       storageGet: async (cacheKey) => chrome.storage.local.get([cacheKey]),
       storageSet: async (value) => chrome.storage.local.set(value)
     })
   : null;
 
+function ensureClientConfigAutoRefreshAlarm() {
+  if (!chrome.alarms?.create) return;
+  try {
+    chrome.alarms.create(CLIENT_CONFIG_REFRESH_ALARM, {
+      periodInMinutes: CLIENT_CONFIG_REFRESH_PERIOD_MINUTES
+    });
+  } catch (error) {
+    console.warn('创建客户端配置自动刷新定时器失败:', error?.message || error);
+  }
+}
+
+async function refreshClientConfigInBackground(reason = 'manual') {
+  try {
+    if (clientConfigCache) {
+      const result = await clientConfigCache.fetchWithCache(fetchClientConfigFromApi, { forceRefresh: true });
+      if (!result?.success) {
+        console.warn(`[ClientConfig] 后台刷新失败(${reason}):`, result?.error || 'unknown error');
+        return;
+      }
+      console.log(`[ClientConfig] 后台刷新完成(${reason}) source=${result.source || 'network'} stale=${result.stale === true}`);
+      return;
+    }
+    await fetchClientConfigFromApi();
+    console.log(`[ClientConfig] 后台刷新完成(${reason}) source=network(no-cache)`);
+  } catch (error) {
+    console.warn(`[ClientConfig] 后台刷新异常(${reason}):`, error?.message || error);
+  }
+}
+
 // 监听安装事件
 chrome.runtime.onInstalled.addListener((details) => {
+  ensureClientConfigAutoRefreshAlarm();
+  void refreshClientConfigInBackground(`onInstalled:${details.reason || 'unknown'}`);
+
   if (details.reason === 'install') {
     console.log('ChatGPT 对话保存助手已安装');
     
@@ -34,6 +70,18 @@ chrome.runtime.onInstalled.addListener((details) => {
     console.log('ChatGPT 对话保存助手已更新');
   }
 });
+
+chrome.runtime.onStartup.addListener(() => {
+  ensureClientConfigAutoRefreshAlarm();
+  void refreshClientConfigInBackground('onStartup');
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (!alarm || alarm.name !== CLIENT_CONFIG_REFRESH_ALARM) return;
+  void refreshClientConfigInBackground('alarm');
+});
+
+ensureClientConfigAutoRefreshAlarm();
 
 function isChatGPTUrl(url) {
   return typeof url === 'string' && (
@@ -107,6 +155,10 @@ async function handleMessage(request, sender, sendResponse) {
       case 'pluginGetClientConfig':
         await handlePluginGetClientConfig(request, sendResponse);
         break;
+
+      case 'printToPdfFromHtml':
+        await handlePrintToPdfFromHtml(request, sender, sendResponse);
+        break;
         
       default:
         sendResponse({ error: '未知操作' });
@@ -157,6 +209,163 @@ async function handlePluginCardKeyRequest(path, request, sendResponse) {
       message: '网络错误: ' + e.message,
       data: { authorized: false }
     });
+  }
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
+async function waitForTabComplete(tabId, timeoutMs = 8000) {
+  const current = await chrome.tabs.get(tabId);
+  if (current?.status === 'complete') return;
+
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error('等待临时标签页加载超时'));
+    }, timeoutMs);
+
+    const onUpdated = (updatedTabId, changeInfo) => {
+      if (updatedTabId !== tabId) return;
+      if (changeInfo.status === 'complete') {
+        cleanup();
+        resolve();
+      }
+    };
+
+    function cleanup() {
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+    }
+
+    chrome.tabs.onUpdated.addListener(onUpdated);
+  });
+}
+
+async function waitForPrintReady(debuggee, timeoutMs = 8000) {
+  const startedAt = Date.now();
+  while ((Date.now() - startedAt) < timeoutMs) {
+    try {
+      const stateResult = await chrome.debugger.sendCommand(debuggee, 'Runtime.evaluate', {
+        expression: '(() => { const imgs = Array.from(document.images || []); const imgReady = imgs.every(img => img.complete); const fontsReady = !document.fonts || document.fonts.status === "loaded"; return { readyState: document.readyState, imgReady, fontsReady }; })()',
+        returnByValue: true
+      });
+
+      const payload = stateResult?.result?.value || {};
+      if (payload.readyState === 'complete' && payload.imgReady && payload.fontsReady) {
+        return;
+      }
+    } catch (e) {
+      // ignore and retry
+    }
+    await delay(120);
+  }
+}
+
+function normalizePrintOptions(input) {
+  const opts = input && typeof input === 'object' ? input : {};
+  const toNumber = (value, fallback) => {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? n : fallback;
+  };
+
+  return {
+    printBackground: opts.printBackground !== false,
+    preferCSSPageSize: opts.preferCSSPageSize !== false,
+    landscape: opts.landscape === true,
+    scale: Math.max(0.1, Math.min(2, toNumber(opts.scale, 1))),
+    paperWidth: toNumber(opts.paperWidth, 8.27),
+    paperHeight: toNumber(opts.paperHeight, 11.69),
+    marginTop: Math.max(0, toNumber(opts.marginTop, 0.4)),
+    marginBottom: Math.max(0, toNumber(opts.marginBottom, 0.4)),
+    marginLeft: Math.max(0, toNumber(opts.marginLeft, 0.35)),
+    marginRight: Math.max(0, toNumber(opts.marginRight, 0.35))
+  };
+}
+
+async function handlePrintToPdfFromHtml(request, sender, sendResponse) {
+  const html = String(request?.html || '');
+  if (!html.trim()) {
+    sendResponse({ success: false, error: 'HTML 内容为空' });
+    return;
+  }
+  if (html.length > 12_000_000) {
+    sendResponse({ success: false, error: 'HTML 内容过大，请缩短对话后重试' });
+    return;
+  }
+
+  let tabId = null;
+  let attached = false;
+  const debuggee = { tabId: -1 };
+
+  try {
+    const createdTab = await chrome.tabs.create({
+      url: 'about:blank',
+      active: false
+    });
+
+    tabId = createdTab?.id;
+    if (!tabId) throw new Error('创建临时打印标签页失败');
+    debuggee.tabId = tabId;
+
+    await waitForTabComplete(tabId, 8000);
+    await chrome.debugger.attach(debuggee, DEBUGGER_PROTOCOL_VERSION);
+    attached = true;
+
+    await chrome.debugger.sendCommand(debuggee, 'Page.enable');
+    await chrome.debugger.sendCommand(debuggee, 'Runtime.enable');
+
+    const frameTree = await chrome.debugger.sendCommand(debuggee, 'Page.getFrameTree');
+    const frameId = frameTree?.frameTree?.frame?.id;
+    if (!frameId) throw new Error('获取打印页面 frame 失败');
+
+    await chrome.debugger.sendCommand(debuggee, 'Page.setDocumentContent', {
+      frameId,
+      html
+    });
+    await delay(120);
+    await waitForPrintReady(debuggee, 8000);
+    await chrome.debugger.sendCommand(debuggee, 'Emulation.setEmulatedMedia', {
+      media: 'print'
+    });
+
+    const pdfResult = await chrome.debugger.sendCommand(
+      debuggee,
+      'Page.printToPDF',
+      normalizePrintOptions(request?.options)
+    );
+
+    if (!pdfResult?.data) {
+      throw new Error('printToPDF 未返回数据');
+    }
+
+    sendResponse({
+      success: true,
+      data: pdfResult.data,
+      mimeType: 'application/pdf'
+    });
+  } catch (error) {
+    console.error('HTML 原样 PDF 导出失败:', error);
+    sendResponse({
+      success: false,
+      error: error?.message || 'HTML 原样 PDF 导出失败'
+    });
+  } finally {
+    if (attached) {
+      try {
+        await chrome.debugger.detach(debuggee);
+      } catch (e) {
+        // ignore detach failures
+      }
+    }
+    if (tabId) {
+      try {
+        await chrome.tabs.remove(tabId);
+      } catch (e) {
+        // ignore remove failures
+      }
+    }
   }
 }
 

@@ -63,7 +63,8 @@
     pin: '<svg viewBox="0 0 24 24"><path d="M8 4.5l8 8"></path><path d="M9.5 10.5 5 15l4 1 1 4 4.5-4.5"></path><path d="M15 4.5 19.5 9"></path></svg>',
     puzzle: '<svg viewBox="0 0 24 24"><path d="M8 6h4a2 2 0 1 1 4 0h2v4a2 2 0 1 1 0 4v4h-4a2 2 0 1 1-4 0H8v-4a2 2 0 1 1 0-4z"></path></svg>',
     edit: '<svg viewBox="0 0 24 24"><path d="M4 20l4.2-.9L18 9.3 14.7 6 4.9 15.8z"></path><path d="M13.8 6.9 16.9 3.8 20.2 7.1 17.1 10.2"></path></svg>',
-    trash: '<svg viewBox="0 0 24 24"><path d="M4.5 7.5h15"></path><path d="M9 7.5v-2h6v2"></path><path d="M7.5 7.5l1 11h7l1-11"></path><path d="M10 11v5"></path><path d="M14 11v5"></path></svg>'
+    trash: '<svg viewBox="0 0 24 24"><path d="M4.5 7.5h15"></path><path d="M9 7.5v-2h6v2"></path><path d="M7.5 7.5l1 11h7l1-11"></path><path d="M10 11v5"></path><path d="M14 11v5"></path></svg>',
+    info: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"></circle><path d="M12 10.5v5"></path><circle cx="12" cy="7.5" r="0.9" fill="currentColor" stroke="none"></circle></svg>'
   });
 
   function uiIcon(name, className = '') {
@@ -863,6 +864,7 @@
     logContent: null,
     toast: null,
     toastTimer: null,
+    aboutLoaded: false,
 
     init() {
       this.addStyles();
@@ -1054,6 +1056,71 @@
         .saver-icon-btn:hover { background: var(--saver-format-active-bg); color: var(--saver-text); }
         .saver-icon-btn.danger { color: #ef4444; }
         .saver-icon-btn.danger:hover { background: rgba(239,68,68,0.12); color: #dc2626; }
+        .saver-about-card { border: 1px solid var(--saver-border); border-radius: 10px; background: var(--saver-format-bg); padding: 10px; margin-bottom: 10px; }
+        .saver-about-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--saver-sub-text); margin-bottom: 8px; }
+        .saver-about-row strong { color: var(--saver-text); font-weight: 600; }
+        .saver-about-status { font-size: 11px; color: var(--saver-sub-text); margin-bottom: 8px; }
+        .saver-about-notice { line-height: 1.7; font-size: 13px; color: var(--saver-text); background: var(--saver-bg); border: 1px solid var(--saver-border); border-radius: 8px; padding: 12px; word-break: break-word; }
+        .saver-about-notice h1,
+        .saver-about-notice h2,
+        .saver-about-notice h3,
+        .saver-about-notice h4 {
+          margin: 0.8em 0 0.45em;
+          line-height: 1.35;
+          color: var(--saver-text);
+        }
+        .saver-about-notice h1 { font-size: 18px; }
+        .saver-about-notice h2 { font-size: 16px; }
+        .saver-about-notice h3 { font-size: 14px; }
+        .saver-about-notice p { margin: 0.55em 0; }
+        .saver-about-notice ul,
+        .saver-about-notice ol { margin: 0.55em 0 0.75em 1.25em; padding: 0; }
+        .saver-about-notice li { margin: 0.3em 0; }
+        .saver-about-notice strong { color: var(--saver-text); font-weight: 600; }
+        .saver-about-notice code {
+          font-family: Consolas, Monaco, monospace;
+          background: var(--saver-format-active-bg);
+          border: 1px solid var(--saver-border);
+          border-radius: 5px;
+          padding: 1px 5px;
+          font-size: 12px;
+        }
+        .saver-about-notice pre {
+          margin: 0.75em 0;
+          padding: 10px;
+          border: 1px solid var(--saver-border);
+          border-radius: 8px;
+          background: var(--saver-format-active-bg);
+          overflow-x: auto;
+        }
+        .saver-about-notice pre code {
+          background: transparent;
+          border: 0;
+          border-radius: 0;
+          padding: 0;
+          font-size: 12px;
+        }
+        .saver-about-notice blockquote {
+          margin: 0.75em 0;
+          padding: 0.3em 0.75em;
+          border-left: 3px solid var(--saver-active-color);
+          background: rgba(16, 163, 127, 0.06);
+          color: var(--saver-sub-text);
+        }
+        .saver-about-notice hr {
+          border: 0;
+          height: 1px;
+          background: var(--saver-border);
+          margin: 1em 0;
+        }
+        .saver-about-notice a {
+          color: var(--saver-active-color);
+          text-decoration: none;
+          border-bottom: 1px solid rgba(16, 163, 127, 0.3);
+        }
+        .saver-about-notice a:hover { text-decoration: underline; }
+        .saver-about-action-row { display: flex; gap: 8px; }
+        .saver-about-action-row .saver-action-btn { margin-bottom: 0; }
         .saver-context-status { font-size: 12px; color: var(--saver-sub-text); text-align: center; padding: 16px 12px; line-height: 1.6; }
         .saver-cardkey-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 100000; }
         .saver-cardkey-dialog { background: var(--saver-bg, #fff); border-radius: 16px; padding: 32px 24px; width: 340px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; text-align: center; color: var(--saver-text, #333); }
@@ -1212,6 +1279,10 @@
             </span>
             <span class="saver-tab-label">模板</span>
           </button>
+          <button class="saver-tab" data-tab="about">
+            <span class="saver-tab-icon" aria-hidden="true">${UI_ICON_SVGS.info}</span>
+            <span class="saver-tab-label">关于</span>
+          </button>
         </div>
         <div class="saver-tab-content active" id="saver-tab-save">
           <div class="saver-panel-content">
@@ -1321,6 +1392,22 @@
             <div id="saver-template-quota" style="font-size:11px;color:var(--saver-sub-text);opacity:0.85;margin-bottom:6px;"></div>
             <div style="font-size:11px;color:var(--saver-sub-text);opacity:0.8;margin-bottom:8px;">内置模板支持编辑与恢复默认，自定义模板支持新增/编辑/删除。</div>
             <div id="saver-ctx-template-list" style="overflow-y:auto;margin-bottom:8px;"></div>
+          </div>
+        </div>
+        <div class="saver-tab-content" id="saver-tab-about">
+          <div class="saver-panel-content">
+            <div class="saver-about-card">
+              <div class="saver-about-row">
+                <span>${iconLabel('info', '插件公告')}</span>
+                <strong id="saver-about-updated">-</strong>
+              </div>
+              <div id="saver-about-status" class="saver-about-status">正在加载公告...</div>
+              <div id="saver-about-notice" class="saver-about-notice">加载中...</div>
+            </div>
+            <div class="saver-about-action-row">
+              <button class="saver-action-btn" id="saver-about-upgrade" disabled>一键激活</button>
+              <button class="saver-action-btn secondary" id="saver-about-refresh">刷新公告</button>
+            </div>
           </div>
         </div>
       `;
@@ -1507,6 +1594,9 @@
           if (tab.dataset.tab === 'context') ContextManager.refreshList();
           if (tab.dataset.tab === 'nav') ChatNavigator.refresh();
           if (tab.dataset.tab === 'template') this._refreshTemplateList();
+          if (tab.dataset.tab === 'about') {
+            this.refreshAboutConfig({ forceRefresh: !this.aboutLoaded });
+          }
           this.refreshFeatureQuotaIndicators();
         };
       });
@@ -1546,6 +1636,23 @@
             return;
           }
           this._showTemplateEditor(null, { create: true });
+        };
+      }
+
+      const aboutRefreshBtn = document.getElementById('saver-about-refresh');
+      if (aboutRefreshBtn) {
+        aboutRefreshBtn.onclick = () => this.refreshAboutConfig({ forceRefresh: true });
+      }
+
+      const aboutUpgradeBtn = document.getElementById('saver-about-upgrade');
+      if (aboutUpgradeBtn) {
+        aboutUpgradeBtn.onclick = () => {
+          const target = aboutUpgradeBtn.dataset.url || '';
+          if (!target) {
+            this.showToast('当前没有可用激活链接', 'info');
+            return;
+          }
+          window.open(target, '_blank', 'noopener,noreferrer');
         };
       }
 
@@ -2276,6 +2383,115 @@
         }
       };
       document.addEventListener('keydown', onKey);
+    },
+
+    async refreshAboutConfig(options = {}) {
+      const statusEl = document.getElementById('saver-about-status');
+      const noticeEl = document.getElementById('saver-about-notice');
+      const updatedEl = document.getElementById('saver-about-updated');
+      const upgradeBtn = document.getElementById('saver-about-upgrade');
+      if (!statusEl || !noticeEl || !updatedEl || !upgradeBtn) return;
+
+      statusEl.textContent = '正在加载公告...';
+      noticeEl.textContent = '加载中...';
+      upgradedisable();
+
+      const forceRefresh = options?.forceRefresh === true;
+      try {
+        const response = await new Promise((resolve) => {
+          chrome.runtime.sendMessage({ action: 'pluginGetClientConfig', forceRefresh }, (resp) => {
+            resolve(resp || null);
+          });
+        });
+
+        if (!response || response.success !== true) {
+          throw new Error(response?.message || response?.error || '获取公告失败');
+        }
+
+        const payload = response.data && typeof response.data === 'object' ? response.data : {};
+        const announcement = String(
+          payload.plugin_announcement_md
+          || payload.noticeMarkdown
+          || payload.notice_markdown
+          || payload.announcement_markdown
+          || payload.announcement
+          || ''
+        ).trim();
+        const upgradeUrl = this._normalizeHttpUrl(
+          payload.plugin_upgrade_url
+          || payload.upgradeUrl
+          || payload.upgrade_url
+          || ''
+        );
+        const updatedAt = this._formatAboutTime(
+          payload.updated_at
+          || payload.updatedAt
+          || (response.fetchedAt ? new Date(response.fetchedAt).toISOString() : '')
+        );
+        const stale = response.stale === true;
+
+        noticeEl.innerHTML = this._renderAnnouncementHtml(announcement);
+        statusEl.textContent = stale ? '公告加载成功（缓存）' : '公告加载成功';
+        updatedEl.textContent = updatedAt || '-';
+
+        if (upgradeUrl) {
+          upgradeBtn.disabled = false;
+          upgradeBtn.dataset.url = upgradeUrl;
+          upgradeBtn.title = upgradeUrl;
+        } else {
+          upgradedisable();
+          statusEl.textContent = `${statusEl.textContent}，未提供激活链接`;
+        }
+        this.aboutLoaded = true;
+      } catch (error) {
+        statusEl.textContent = `公告加载失败：${error?.message || '未知错误'}`;
+        noticeEl.textContent = '暂无公告内容';
+        updatedEl.textContent = '-';
+        upgradedisable();
+      }
+
+      function upgradedisable() {
+        upgradeBtn.disabled = true;
+        upgradeBtn.dataset.url = '';
+        upgradeBtn.title = '';
+      }
+    },
+
+    _renderAnnouncementHtml(markdownText) {
+      const raw = String(markdownText || '').trim();
+      if (!raw) {
+        return '<span style="color:var(--saver-sub-text);">暂无公告</span>';
+      }
+      const renderer = window.ChatGPTSaver?.AboutRenderer;
+      if (renderer && typeof renderer.renderMarkdownSafe === 'function') {
+        const html = renderer.renderMarkdownSafe(raw, {
+          marked: globalThis.marked,
+          DOMPurify: globalThis.DOMPurify
+        });
+        if (String(html || '').trim()) return html;
+      }
+      const escaped = this._escapeHtml(raw).replace(/\r\n/g, '\n').replace(/\n/g, '<br>');
+      return escaped;
+    },
+
+    _normalizeHttpUrl(urlValue) {
+      const raw = String(urlValue || '').trim();
+      if (!raw) return '';
+      try {
+        const parsed = new URL(raw);
+        if (!['http:', 'https:'].includes(parsed.protocol)) return '';
+        return parsed.href;
+      } catch {
+        return '';
+      }
+    },
+
+    _formatAboutTime(value) {
+      const raw = String(value || '').trim();
+      if (!raw) return '';
+      const ts = Date.parse(raw);
+      if (!Number.isFinite(ts)) return raw;
+      return new Date(ts).toLocaleString('zh-CN', { hour12: false });
     },
 
     _escapeHtml(text) {

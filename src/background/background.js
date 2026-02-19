@@ -2,6 +2,21 @@
  * ChatGPT 对话保存助手 - Background Service Worker
  */
 
+import '../utils/clientConfigCache.js';
+
+const CLIENT_CONFIG_URL = 'https://seat.20050225.xyz/api/plugin/card-keys/client-config';
+const BASE_API_URL = 'https://seat.20050225.xyz';
+
+const clientConfigCacheApi = globalThis.ChatGPTSaver?.ClientConfigCache;
+const clientConfigCache = clientConfigCacheApi?.createClientConfigCache
+  ? clientConfigCacheApi.createClientConfigCache({
+      ttlMs: 10 * 60 * 1000,
+      cacheKey: 'pluginClientConfigCacheV1',
+      storageGet: async (cacheKey) => chrome.storage.local.get([cacheKey]),
+      storageSet: async (value) => chrome.storage.local.set(value)
+    })
+  : null;
+
 // 监听安装事件
 chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === 'install') {
@@ -88,6 +103,10 @@ async function handleMessage(request, sender, sendResponse) {
       case 'pluginRebindCardKey':
         await handlePluginCardKeyRequest('/api/plugin/card-keys/rebind', request, sendResponse);
         break;
+
+      case 'pluginGetClientConfig':
+        await handlePluginGetClientConfig(request, sendResponse);
+        break;
         
       default:
         sendResponse({ error: '未知操作' });
@@ -121,8 +140,7 @@ async function handleDownload(request, sendResponse) {
  */
 async function handlePluginCardKeyRequest(path, request, sendResponse) {
   try {
-    const baseUrl = 'https://seat.20050225.xyz';
-    const resp = await fetch(baseUrl + path, {
+    const resp = await fetch(BASE_API_URL + path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -138,6 +156,73 @@ async function handlePluginCardKeyRequest(path, request, sendResponse) {
       success: false,
       message: '网络错误: ' + e.message,
       data: { authorized: false }
+    });
+  }
+}
+
+async function fetchClientConfigFromApi() {
+  const resp = await fetch(CLIENT_CONFIG_URL, {
+    method: 'GET',
+    cache: 'no-store',
+    headers: {
+      Accept: 'application/json'
+    }
+  });
+  if (!resp.ok) {
+    throw new Error(`HTTP ${resp.status}`);
+  }
+
+  const json = await resp.json();
+  if (json?.success === false) {
+    throw new Error(json?.message || '获取配置失败');
+  }
+  return json?.data || json || {};
+}
+
+async function handlePluginGetClientConfig(request, sendResponse) {
+  try {
+    if (!clientConfigCache) {
+      const payload = await fetchClientConfigFromApi();
+      sendResponse({
+        success: true,
+        data: payload,
+        stale: false,
+        source: 'network',
+        fetchedAt: Date.now()
+      });
+      return;
+    }
+
+    const result = await clientConfigCache.fetchWithCache(fetchClientConfigFromApi, {
+      forceRefresh: request?.forceRefresh === true
+    });
+
+    if (result.success) {
+      sendResponse({
+        success: true,
+        data: result.data || {},
+        stale: result.stale === true,
+        source: result.source || 'cache',
+        fetchedAt: result.fetchedAt || null,
+        error: result.error || null
+      });
+      return;
+    }
+
+    sendResponse({
+      success: false,
+      data: null,
+      stale: false,
+      source: result.source || 'empty',
+      message: result.error || '获取配置失败'
+    });
+  } catch (error) {
+    sendResponse({
+      success: false,
+      data: null,
+      stale: false,
+      source: 'empty',
+      message: error?.message || '获取配置失败'
     });
   }
 }

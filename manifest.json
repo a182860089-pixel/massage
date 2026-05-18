@@ -1,12 +1,14 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT 对话保存助手",
-  "version": "2.0.1",
-  "description": "自动保存 ChatGPT 对话并导出为 HTML、Markdown、PDF、JSON，支持附件与上下文保存",
+  "version": "2.1.0",
+  "description": "自动保存 ChatGPT 对话并导出为 HTML、Markdown、PDF、JSON，支持附件、上下文保存、一键复制、多入口快捷键",
   "permissions": [
     "storage",
     "downloads",
-    "alarms"
+    "alarms",
+    "contextMenus",
+    "clipboardWrite"
   ],
   "host_permissions": [
     "https://chat.openai.com/*",
@@ -65,6 +67,13 @@
         "src/utils/accessManager.js",
         "src/utils/featureQuotaManager.js",
         "src/utils/exporter.js",
+        "src/core/model.js",
+        "src/core/commandBus.js",
+        "src/core/clipboard.js",
+        "src/core/exporter.js",
+        "src/adapters/_base.js",
+        "src/adapters/chatgpt/parser.js",
+        "src/adapters/chatgpt/index.js",
         "src/content/parser.js",
         "src/content/observer.js",
         "src/content/content.js"
@@ -87,5 +96,19 @@
       ],
       "matches": ["https://chat.openai.com/*", "https://chatgpt.com/*"]
     }
-  ]
+  ],
+  "commands": {
+    "save-now": {
+      "suggested_key": { "default": "Alt+Shift+S" },
+      "description": "立即保存当前对话"
+    },
+    "copy-markdown": {
+      "suggested_key": { "default": "Alt+Shift+C" },
+      "description": "复制当前对话为 Markdown"
+    },
+    "open-saver-panel": {
+      "suggested_key": { "default": "Alt+Shift+E" },
+      "description": "打开保存助手侧边栏"
+    }
+  }
 }

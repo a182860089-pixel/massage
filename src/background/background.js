@@ -53,6 +53,7 @@ async function refreshClientConfigInBackground(reason = 'manual') {
 chrome.runtime.onInstalled.addListener((details) => {
   ensureClientConfigAutoRefreshAlarm();
   void refreshClientConfigInBackground(`onInstalled:${details.reason || 'unknown'}`);
+  void ensureContextMenus();
 
   if (details.reason === 'install') {
     console.log('ChatGPT 对话保存助手已安装');
@@ -79,9 +80,101 @@ chrome.runtime.onInstalled.addListener((details) => {
   }
 });
 
+// 右键菜单注册
+const CONTEXT_MENU_DOCUMENT_URL_PATTERNS = [
+  'https://chat.openai.com/*',
+  'https://chatgpt.com/*'
+];
+
+async function ensureContextMenus() {
+  if (!chrome.contextMenus?.removeAll) return;
+  try {
+    await new Promise((resolve) => chrome.contextMenus.removeAll(resolve));
+    chrome.contextMenus.create({
+      id: 'saver_save_now',
+      title: '💾 立即保存当前对话',
+      contexts: ['page', 'selection'],
+      documentUrlPatterns: CONTEXT_MENU_DOCUMENT_URL_PATTERNS
+    });
+    chrome.contextMenus.create({
+      id: 'saver_copy_markdown',
+      title: '📋 复制当前对话为 Markdown',
+      contexts: ['page', 'selection'],
+      documentUrlPatterns: CONTEXT_MENU_DOCUMENT_URL_PATTERNS
+    });
+    chrome.contextMenus.create({
+      id: 'saver_copy_richtext',
+      title: '📄 复制当前对话为富文本（HTML）',
+      contexts: ['page', 'selection'],
+      documentUrlPatterns: CONTEXT_MENU_DOCUMENT_URL_PATTERNS
+    });
+    chrome.contextMenus.create({
+      id: 'saver_open_panel',
+      title: '🗂 打开保存助手侧边栏',
+      contexts: ['page'],
+      documentUrlPatterns: CONTEXT_MENU_DOCUMENT_URL_PATTERNS
+    });
+  } catch (error) {
+    console.warn('注册右键菜单失败:', error?.message || error);
+  }
+}
+
+// 右键菜单 → 转发到 content
+chrome.contextMenus?.onClicked?.addListener(async (info, tab) => {
+  if (!tab?.id || !isChatGPTUrl(tab.url)) return;
+  const map = {
+    saver_save_now: { commandId: 'export.current', args: { source: 'context_menu' } },
+    saver_copy_markdown: { commandId: 'copy.markdown', args: { source: 'context_menu' } },
+    saver_copy_richtext: { commandId: 'copy.richtext', args: { source: 'context_menu' } },
+    saver_open_panel: { action: 'togglePanel' }
+  };
+  const entry = map[info.menuItemId];
+  if (!entry) return;
+  try {
+    if (entry.action) {
+      await chrome.tabs.sendMessage(tab.id, { action: entry.action });
+    } else {
+      await chrome.tabs.sendMessage(tab.id, {
+        action: 'runCommand',
+        commandId: entry.commandId,
+        args: entry.args || {}
+      });
+    }
+  } catch (error) {
+    console.warn('转发右键菜单失败:', error?.message || error);
+  }
+});
+
+// 键盘快捷键 → 转发到 content
+chrome.commands?.onCommand?.addListener(async (commandName) => {
+  const map = {
+    'save-now': 'export.current',
+    'copy-markdown': 'copy.markdown',
+    'open-saver-panel': '__open_panel__'
+  };
+  const target = map[commandName];
+  if (!target) return;
+  try {
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!activeTab?.id || !isChatGPTUrl(activeTab.url)) return;
+    if (target === '__open_panel__') {
+      await chrome.tabs.sendMessage(activeTab.id, { action: 'togglePanel' });
+    } else {
+      await chrome.tabs.sendMessage(activeTab.id, {
+        action: 'runCommand',
+        commandId: target,
+        args: { source: 'shortcut' }
+      });
+    }
+  } catch (error) {
+    console.warn('转发快捷键失败:', error?.message || error);
+  }
+});
+
 chrome.runtime.onStartup.addListener(() => {
   ensureClientConfigAutoRefreshAlarm();
   void refreshClientConfigInBackground('onStartup');
+  void ensureContextMenus();
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {

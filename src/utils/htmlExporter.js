@@ -367,6 +367,109 @@ const HTMLExporter = {
       margin: 24px 0;
     }
 
+    /* === 高级 Block 样式 === */
+    .canvas-block {
+      display: block;
+      margin: 14px 0;
+      padding: 12px 14px 14px;
+      border: 1px solid #d6c5f0;
+      border-left: 4px solid #6b46c1;
+      border-radius: 12px;
+      background: #faf6ff;
+    }
+    .canvas-block h4 {
+      margin: 0 0 8px;
+      font-size: 14px;
+      color: #5b3a99;
+      font-weight: 700;
+    }
+    .canvas-block pre { background: #1f1f24; color: #e5e7eb; }
+    .canvas-block .code-shell { border: none; background: transparent; }
+
+    .thought-block {
+      margin: 14px 0;
+      padding: 0;
+      border: 1px solid #e5e7eb;
+      border-left: 4px solid #6b7280;
+      border-radius: 10px;
+      background: #f9fafb;
+      overflow: hidden;
+    }
+    .thought-block > summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 10px 14px;
+      font-size: 13px;
+      font-weight: 600;
+      color: #374151;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .thought-block > summary::-webkit-details-marker { display: none; }
+    .thought-block > summary::after {
+      content: '▾';
+      margin-left: auto;
+      transition: transform 120ms ease;
+      color: #6b7280;
+    }
+    .thought-block[open] > summary::after { transform: rotate(180deg); }
+    .thought-block[open] > :not(summary) {
+      padding: 4px 14px 14px;
+      color: #4b5563;
+      font-size: 13.5px;
+    }
+
+    .web-search-block {
+      margin: 14px 0;
+      padding: 12px 14px;
+      border: 1px solid #c4dafd;
+      border-left: 4px solid #3b82f6;
+      border-radius: 12px;
+      background: #f0f7ff;
+    }
+    .web-search-block .search-queries {
+      margin: 0 0 8px;
+      font-size: 13px;
+      color: #1e3a8a;
+      font-weight: 600;
+    }
+    .web-search-block .search-sources {
+      margin: 6px 0 0 18px;
+      padding: 0;
+    }
+    .web-search-block .search-sources li {
+      margin: 4px 0;
+      font-size: 13px;
+    }
+    .web-search-block .snippet {
+      color: #4b5563;
+      font-size: 12.5px;
+      margin-top: 2px;
+    }
+
+    .deep-research-block {
+      margin: 14px 0;
+      padding: 14px 16px;
+      border: 1px solid #cbd5e1;
+      border-radius: 12px;
+      background: #f8fafc;
+    }
+    .deep-research-block h4 {
+      margin: 0 0 10px;
+      font-size: 15px;
+      color: #0f172a;
+      font-weight: 700;
+    }
+    .deep-research-block .dr-citations {
+      margin: 12px 0 0 18px;
+      padding: 0;
+      font-size: 12.5px;
+      color: #4b5563;
+    }
+    .deep-research-block .dr-citations li { margin: 3px 0; }
+    .deep-research-block a { color: #0f766e; }
+
     .chat-footer {
       max-width: 760px;
       margin: 18px auto 0;

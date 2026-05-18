@@ -116,6 +116,88 @@ function createMarkdownTurndownService(options = {}) {
     }
   });
 
+  // 高级 Block 在 modelToLegacyConversation 时已渲染为下面 4 个 CSS class，
+  // 这里把它们转成 Markdown 友好的形式。
+  service.addRule('canvasBlock', {
+    filter(node) {
+      return node.nodeName === 'ASIDE' && node.classList?.contains('canvas-block');
+    },
+    replacement(content, node) {
+      const title = (node.querySelector('h4')?.textContent || 'Canvas').trim();
+      const codeEl = node.querySelector('pre code');
+      let lang = '';
+      let code = '';
+      if (codeEl) {
+        const cls = Array.from(codeEl.classList || []).find((c) => c.startsWith('language-'));
+        if (cls) lang = cls.replace('language-', '');
+        code = codeEl.textContent || '';
+      }
+      const body = code ? `\n\n\`\`\`${lang}\n${code}\n\`\`\`` : '';
+      return `\n\n### 🖼 ${title}${body}\n\n`;
+    }
+  });
+
+  service.addRule('thoughtBlock', {
+    filter(node) {
+      return node.nodeName === 'DETAILS' && node.classList?.contains('thought-block');
+    },
+    replacement(content, node) {
+      const summary = (node.querySelector('summary')?.textContent || 'Thoughts').trim();
+      const clone = node.cloneNode(true);
+      const s = clone.querySelector('summary');
+      if (s) s.remove();
+      const innerText = String(clone.textContent || '').trim();
+      const quoted = innerText.split('\n').map((line) => `> ${line}`).join('\n');
+      return `\n\n> **💭 ${summary}**\n${quoted || '>'}\n\n`;
+    }
+  });
+
+  service.addRule('webSearchBlock', {
+    filter(node) {
+      return node.nodeName === 'SECTION' && node.classList?.contains('web-search-block');
+    },
+    replacement(content, node) {
+      const queryEl = node.querySelector('.search-queries');
+      const queries = queryEl ? queryEl.textContent.trim() : '';
+      const items = Array.from(node.querySelectorAll('.search-sources li a'));
+      const lines = items.map((a, idx) => {
+        const title = (a.textContent || '').trim() || a.getAttribute('href') || '';
+        const href = a.getAttribute('href') || '';
+        return `${idx + 1}. [${title}](${href})`;
+      });
+      const head = queries ? `**🔍 Web Search**：${queries}\n\n` : '**🔍 Web Search**\n\n';
+      return `\n\n${head}${lines.join('\n')}\n\n`;
+    }
+  });
+
+  service.addRule('deepResearchBlock', {
+    filter(node) {
+      return node.nodeName === 'SECTION' && node.classList?.contains('deep-research-block');
+    },
+    replacement(content, node) {
+      const title = (node.querySelector('h4')?.textContent || 'Deep Research').trim();
+      const citationEls = node.querySelectorAll('.dr-citations li a');
+      const clone = node.cloneNode(true);
+      clone.querySelectorAll('.dr-citations').forEach((el) => el.remove());
+      clone.querySelectorAll('h4').forEach((el) => el.remove());
+      const bodyHtml = clone.innerHTML;
+      const bodyMd = String(bodyHtml || '')
+        .replace(/<br\s*\/?\s*>/gi, '\n')
+        .replace(/<\/p\s*>/gi, '\n\n')
+        .replace(/<[^>]+>/g, '')
+        .trim();
+      let citations = '';
+      if (citationEls.length) {
+        citations = '\n\n**Citations**\n\n' + Array.from(citationEls).map((a, idx) => {
+          const t = (a.textContent || '').trim() || a.getAttribute('href') || '';
+          const h = a.getAttribute('href') || '';
+          return `${idx + 1}. [${t}](${h})`;
+        }).join('\n');
+      }
+      return `\n\n### 📊 ${title}\n\n${bodyMd}${citations}\n\n`;
+    }
+  });
+
   return service;
 }
 

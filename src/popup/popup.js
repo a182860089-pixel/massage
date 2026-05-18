@@ -242,6 +242,52 @@ exportNowBtn.addEventListener('click', async () => {
   }
 });
 
+// 复制按钮
+const copyMdBtn = document.getElementById('copy-md-btn');
+const copyRichBtn = document.getElementById('copy-rich-btn');
+
+async function runCommandInActiveTab(commandId) {
+  const tab = await getActiveChatGPTTab();
+  if (!tab) {
+    showToast('请先打开 ChatGPT 页面', 'error');
+    return null;
+  }
+  try {
+    const resp = await chrome.tabs.sendMessage(tab.id, {
+      action: 'runCommand',
+      commandId,
+      args: { source: 'popup' }
+    });
+    return resp;
+  } catch (error) {
+    console.error('runCommand 失败:', error);
+    showToast('页面未就绪，请刷新后重试', 'error');
+    return null;
+  }
+}
+
+if (copyMdBtn) {
+  copyMdBtn.addEventListener('click', async () => {
+    const resp = await runCommandInActiveTab('copy.markdown');
+    if (resp?.success && resp?.result?.success) {
+      showToast('已复制为 Markdown');
+    } else if (resp) {
+      showToast(resp?.result?.error || resp?.error || '复制失败', 'error');
+    }
+  });
+}
+
+if (copyRichBtn) {
+  copyRichBtn.addEventListener('click', async () => {
+    const resp = await runCommandInActiveTab('copy.richtext');
+    if (resp?.success && resp?.result?.success) {
+      showToast('已复制为富文本');
+    } else if (resp) {
+      showToast(resp?.result?.error || resp?.error || '复制失败', 'error');
+    }
+  });
+}
+
 [exportHtml, exportMd, exportPdf, exportJson].forEach((checkbox) => {
   checkbox.addEventListener('change', async () => {
     const formats = {

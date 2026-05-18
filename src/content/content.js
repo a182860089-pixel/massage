@@ -3718,6 +3718,7 @@
     // 先初始化 UI（按钮 + 面板 + toast）
     UI.init();
     setupMessageListener();
+    try { ensureCommandBusBindings(); } catch (_) { /* ignore */ }
 
     // 统一访问控制（卡密 / 免费模式）
     await AccessManager.init(CardKeyManager);
@@ -3901,12 +3902,129 @@
         case 'collectHistoricalGeneratedFiles':
           sendResponse(await window.ChatGPTSaver.ConversationAssets.collectGeneratedFiles());
           break;
+        case 'runCommand':
+          {
+            try {
+              ensureCommandBusBindings();
+              const result = await window.ChatGPTSaver.CommandBus.dispatch(
+                request.commandId,
+                request.args || {}
+              );
+              sendResponse({ success: true, result });
+            } catch (err) {
+              sendResponse({ success: false, error: err?.message || String(err) });
+            }
+          }
+          break;
         default:
           sendResponse({ error: '未知操作' });
       }
     } catch (error) {
       sendResponse({ success: false, error: error.message });
     }
+  }
+
+  // ============================================================
+  // CommandBus 绑定（懒加载）
+  // ============================================================
+  let _commandBusBound = false;
+  function ensureCommandBusBindings() {
+    if (_commandBusBound) return;
+    const bus = window.ChatGPTSaver?.CommandBus;
+    const Commands = window.ChatGPTSaver?.Commands;
+    if (!bus || !Commands) return;
+    _commandBusBound = true;
+
+    bus.register(Commands.EXPORT_CURRENT, async () => {
+      const folderReady = await ensureFolderReadyOrPrompt({
+        interactive: true,
+        reason: 'command_export_current',
+        showOverlay: true
+      });
+      if (!folderReady.ready) return { success: false, error: 'folder_not_ready' };
+      return window.ChatGPTSaver.Exporter.exportConversation(
+        config.formats,
+        true,
+        { pdfMode: normalizePdfMode(config.pdfExportMode) }
+      );
+    });
+
+    bus.register(Commands.COPY_MARKDOWN, async () => {
+      const md = buildConversationMarkdown();
+      if (!md) {
+        UI.showToast?.('当前没有可复制的对话', 'warning');
+        return { success: false, error: 'empty' };
+      }
+      const Clipboard = window.ChatGPTSaver?.ClipboardManager;
+      if (!Clipboard) return { success: false, error: 'no_clipboard' };
+      const r = await Clipboard.writeText(md);
+      UI.showToast?.(r.success ? '✅ 已复制为 Markdown' : '❌ 复制失败', r.success ? 'success' : 'error');
+      return r;
+    });
+
+    bus.register(Commands.COPY_RICH_TEXT, async () => {
+      const { html, text } = buildConversationRich();
+      if (!html && !text) {
+        UI.showToast?.('当前没有可复制的对话', 'warning');
+        return { success: false, error: 'empty' };
+      }
+      const Clipboard = window.ChatGPTSaver?.ClipboardManager;
+      const r = await Clipboard.writeRich(html, text);
+      UI.showToast?.(r.success ? '✅ 已复制为富文本' : '❌ 复制失败', r.success ? 'success' : 'error');
+      return r;
+    });
+
+    bus.register(Commands.COPY_RAW, async () => {
+      const { text } = buildConversationRich();
+      const Clipboard = window.ChatGPTSaver?.ClipboardManager;
+      const r = await Clipboard.writeText(text || '');
+      UI.showToast?.(r.success ? '✅ 已复制纯文本' : '❌ 复制失败', r.success ? 'success' : 'error');
+      return r;
+    });
+  }
+
+  function getActiveAdapterAndModel() {
+    const reg = window.ChatGPTSaver?.PlatformAdapterRegistry;
+    const adapter = reg?.resolveForUrl ? reg.resolveForUrl(location.href) : null;
+    const model = adapter?.parseConversationModel?.() || null;
+    return { adapter, model };
+  }
+
+  function buildConversationMarkdown() {
+    const Clipboard = window.ChatGPTSaver?.ClipboardManager;
+    if (!Clipboard) return '';
+    const { adapter, model } = getActiveAdapterAndModel();
+    if (model && model.messages?.length) {
+      return Clipboard.conversationToMarkdown(model, {
+        title: model.title || adapter?.getTitle?.() || '',
+        includeThoughtDetails: false
+      });
+    }
+    // 兜底：旧 parser
+    const conversation = window.ChatGPTSaver?.Parser?.parseConversation?.();
+    const messages = conversation?.messages || [];
+    if (!messages.length) return '';
+    return Clipboard.conversationToMarkdown(messages, { title: conversation?.title || '' });
+  }
+
+  function buildConversationRich() {
+    const Clipboard = window.ChatGPTSaver?.ClipboardManager;
+    if (!Clipboard) return { html: '', text: '' };
+    const { adapter, model } = getActiveAdapterAndModel();
+    const title = (model?.title) || adapter?.getTitle?.() ||
+      window.ChatGPTSaver?.Parser?.getConversationTitle?.() || '';
+    if (model && model.messages?.length) {
+      return {
+        html: Clipboard.conversationToRichHtml(model, { title }),
+        text: Clipboard.conversationToMarkdown(model, { title, includeThoughtDetails: false })
+      };
+    }
+    const conversation = window.ChatGPTSaver?.Parser?.parseConversation?.();
+    if (!conversation || !conversation.messages?.length) return { html: '', text: '' };
+    return {
+      html: Clipboard.conversationToRichHtml(conversation.messages, { title: conversation.title || '' }),
+      text: Clipboard.conversationToMarkdown(conversation.messages, { title: conversation.title || '' })
+    };
   }
 
   function showRefreshPrompt() {

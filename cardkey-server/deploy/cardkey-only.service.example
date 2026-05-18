@@ -1,0 +1,25 @@
+# 复制到 /etc/systemd/system/cardkey-only.service，然后
+#   systemctl daemon-reload
+#   systemctl enable --now cardkey-only.service
+
+[Unit]
+Description=ChatGPT plugin card-key minimal API
+After=network.target postgresql@15-main.service
+Wants=postgresql@15-main.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/cardkey-only
+EnvironmentFile=/opt/cardkey-only/.env
+ExecStart=/opt/cardkey-only/.venv/bin/python -m gunicorn \
+  -w 1 -k gthread --threads 4 --timeout 60 --graceful-timeout 30 \
+  --chdir /opt/cardkey-only \
+  -b 127.0.0.1:8801 'app:create_app()'
+Restart=always
+RestartSec=3
+StandardOutput=append:/opt/cardkey-only/server.log
+StandardError=append:/opt/cardkey-only/server.log
+
+[Install]
+WantedBy=multi-user.target

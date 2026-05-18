@@ -1,0 +1,166 @@
+{% extends "_layout.html" %}
+{% block title %}激活码激活{% endblock %}
+
+{% block extra_style %}
+.shell { min-height: 100vh; display: flex; flex-direction: column; background: var(--color-bg); }
+
+.topbar {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 18px 28px;
+    border-bottom: 1px solid var(--color-border);
+}
+.topbar .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 15px; }
+.topbar .brand .logo {
+    width: 28px; height: 28px; border-radius: 7px;
+    background: var(--color-text); color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 700;
+}
+.topbar .actions { display: flex; align-items: center; gap: 10px; }
+
+.main {
+    flex: 1;
+    display: flex; align-items: center; justify-content: center;
+    padding: 48px 24px;
+}
+.card-wrap { width: 100%; max-width: 460px; }
+.intro { text-align: center; margin-bottom: 28px; }
+.intro h1 { font-size: 28px; letter-spacing: -0.02em; margin-bottom: 8px; }
+.intro p { color: var(--color-text-soft); font-size: 14px; }
+
+.panel {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-xl);
+    padding: 28px 26px;
+    box-shadow: var(--shadow-md);
+}
+
+.result-card {
+    margin-top: 16px;
+    padding: 12px 14px;
+    border-radius: var(--radius-md);
+    font-size: 13.5px;
+    line-height: 1.55;
+    display: none;
+    border: 1px solid transparent;
+}
+.result-card.show { display: block; }
+.result-card.success { background: var(--color-surface-soft); color: var(--color-text); border-color: var(--color-border-strong); }
+.result-card.fail    { background: var(--color-danger-soft);  color: #8a2222; border-color: #f5b5b5; }
+.result-card strong  { font-weight: 600; }
+
+.spinner {
+    display: inline-block; width: 13px; height: 13px;
+    border: 2px solid rgba(255,255,255,0.35); border-top-color: #fff;
+    border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: -2px; margin-right: 6px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.footnote { margin-top: 18px; text-align: center; font-size: 12.5px; color: var(--color-text-muted); }
+
+.foot { padding: 18px 24px; border-top: 1px solid var(--color-border); text-align: center; font-size: 12px; color: var(--color-text-muted); }
+{% endblock %}
+
+{% block body %}
+<div class="shell">
+    <header class="topbar">
+        <div class="brand">
+            <div class="logo">CK</div>
+            <span>cardkey · activation</span>
+        </div>
+        <div class="actions">
+            <a href="{{ url_for('admin.login') }}" class="btn btn-ghost btn-sm">管理员登录</a>
+        </div>
+    </header>
+
+    <main class="main">
+        <div class="card-wrap">
+            <div class="intro">
+                <h1>激活你的卡密</h1>
+                <p>输入激活码与邮箱，立即在本站绑定并在插件中使用</p>
+            </div>
+
+            <div class="panel">
+                <form id="activation-form" autocomplete="off">
+                    <div class="form-group">
+                        <label for="card_key">激活码</label>
+                        <input type="text" id="card_key" name="card_key" class="form-control mono"
+                               placeholder="例如：abcD3xYz9k7m" required autofocus>
+                    </div>
+                    <div class="form-group">
+                        <label for="email">邮箱</label>
+                        <input type="email" id="email" name="email" class="form-control"
+                               placeholder="例如：you@example.com" required>
+                    </div>
+                    <button type="submit" class="btn btn-accent btn-block" id="submit-btn">立即激活</button>
+                </form>
+
+                <div id="result" class="result-card"></div>
+
+                <div class="footnote">激活完成后，请在插件中输入相同的激活码 + 邮箱以同步使用</div>
+            </div>
+        </div>
+    </main>
+
+    <footer class="foot">© cardkey · 简单、安全、本地权威</footer>
+</div>
+
+<script>
+(function () {
+    const form = document.getElementById('activation-form');
+    const submitBtn = document.getElementById('submit-btn');
+    const resultBox = document.getElementById('result');
+
+    function showResult(kind, html) {
+        resultBox.className = 'result-card show ' + kind;
+        resultBox.innerHTML = html;
+    }
+
+    form.addEventListener('submit', async function (e) {
+        e.preventDefault();
+        const cardKey = document.getElementById('card_key').value.trim();
+        const email = document.getElementById('email').value.trim().toLowerCase();
+
+        if (!cardKey || !email) {
+            showResult('fail', '请填写激活码和邮箱');
+            return;
+        }
+
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<span class="spinner"></span>激活中…';
+        resultBox.className = 'result-card';
+
+        try {
+            const resp = await fetch('/api/activation/redeem', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ card_key: cardKey, email: email })
+            });
+            const data = await resp.json();
+            if (data && data.success) {
+                const remaining = (data.data && data.data.remaining_days != null) ? data.data.remaining_days : '-';
+                const expires = (data.data && data.data.expires_at) ? data.data.expires_at.replace('T', ' ').slice(0, 16) : '-';
+                showResult('success',
+                    '<strong>' + (data.message || '激活成功') + '</strong><br>'
+                    + '剩余 <strong>' + remaining + '</strong> 天 · 过期时间 ' + expires
+                    + '<br>即将跳转到详情页…');
+                const params = new URLSearchParams({ card: cardKey, email: email });
+                setTimeout(function () {
+                    window.location.href = '/activation-success?' + params.toString();
+                }, 1100);
+            } else {
+                const msg = (data && data.message) ? data.message : '激活失败';
+                showResult('fail', msg);
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = '立即激活';
+            }
+        } catch (err) {
+            showResult('fail', '网络错误：' + (err && err.message ? err.message : '请稍后再试'));
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = '立即激活';
+        }
+    });
+})();
+</script>
+{% endblock %}

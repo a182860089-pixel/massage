@@ -1,4 +1,3 @@
-// DOM 元素
 const setupSection = document.getElementById('setup-section');
 const mainSection = document.getElementById('main-section');
 const authorizeBtn = document.getElementById('authorize-btn');
@@ -13,83 +12,111 @@ const exportPdf = document.getElementById('export-pdf');
 const exportJson = document.getElementById('export-json');
 const toast = document.getElementById('toast');
 
-// 初始化
-document.addEventListener('DOMContentLoaded', async () => {
-  await loadSettings();
-  await updateStatus();
-  // 定期检查 storage 状态（以防 content script 更新了状态）
-  setTimeout(async () => {
-    const result = await chrome.storage.local.get(['isAuthorized']);
-    if (!result.isAuthorized) {
-      // 权限已过期，显示设置界面
-      resetSetupSection();
-      showSetupSection();
-    }
-  }, 500);
-});
+// popup 当前操作模式：'pick'=首次选择文件夹；'restore'=尝试恢复已有文件夹的权限
+let authorizeMode = 'pick';
 
-// 加载设置
-async function loadSettings() {
-  const result = await chrome.storage.local.get(['isAuthorized', 'savePath', 'savedCount', 'exportFormats']);
-  
-  if (result.isAuthorized && result.savePath) {
-    // 已授权：更新 setupSection 的显示状态
-    updateSetupSectionForAuthorized(result.savePath);
-    
-    // 显示主界面
-    showMainSection();
-    savePath.textContent = result.savePath;
-    savedCount.textContent = result.savedCount || 0;
-    
-    if (result.exportFormats) {
-      exportHtml.checked = result.exportFormats.html !== false;
-      exportMd.checked = result.exportFormats.md !== false;
-      exportPdf.checked = result.exportFormats.pdf !== false;
-      exportJson.checked = result.exportFormats.json !== false;
-    }
+function setAuthorizeButton(label, iconChar, authorized) {
+  authorizeBtn.textContent = '';
+  const icon = document.createElement('span');
+  icon.className = 'btn-icon';
+  icon.textContent = iconChar;
+  const text = document.createTextNode(` ${label}`);
+  authorizeBtn.appendChild(icon);
+  authorizeBtn.appendChild(text);
+  authorizeBtn.classList.toggle('btn-primary', !authorized);
+  authorizeBtn.classList.toggle('btn-secondary', authorized);
+}
+
+function normalizeFolderState(data = {}) {
+  const folderAuthState = String(data.folderAuthState || (data.isAuthorized ? 'granted' : 'missing'));
+  const folderDisplayName = String(data.folderDisplayName || data.savePath || '');
+  const folderLastFailureReason = String(data.folderLastFailureReason || '');
+  return { folderAuthState, folderDisplayName, folderLastFailureReason };
+}
+
+function showSetupSection(message = '首次使用需要选择一个文件夹来保存对话记录。', { mode = 'pick', folderName = '' } = {}) {
+  authorizeMode = mode;
+  const welcomeCard = document.querySelector('.welcome-card');
+  if (mode === 'restore' && folderName) {
+    welcomeCard.querySelector('.welcome-icon').textContent = '🔓';
+    welcomeCard.querySelector('h2').textContent = '需要重新授权';
+    welcomeCard.querySelector('p').textContent = message;
+    setAuthorizeButton(`恢复访问「${folderName}」`, '🔓', false);
   } else {
-    showSetupSection();
+    welcomeCard.querySelector('.welcome-icon').textContent = '👋';
+    welcomeCard.querySelector('h2').textContent = '欢迎使用';
+    welcomeCard.querySelector('p').textContent = message;
+    setAuthorizeButton('选择保存文件夹', '📂', false);
+  }
+  setupSection.classList.remove('hidden');
+  mainSection.classList.add('hidden');
+}
+
+function showMainSection(folderName) {
+  authorizeMode = 'pick';
+  const welcomeCard = document.querySelector('.welcome-card');
+  welcomeCard.querySelector('.welcome-icon').textContent = '✅';
+  welcomeCard.querySelector('h2').textContent = '已设置保存位置';
+  welcomeCard.querySelector('p').textContent = `对话将自动保存到「${folderName}」文件夹`;
+  setAuthorizeButton(folderName, '📂', true);
+  savePath.textContent = folderName;
+  setupSection.classList.add('hidden');
+  mainSection.classList.remove('hidden');
+}
+
+function showToast(message, type = 'success') {
+  toast.textContent = message;
+  toast.className = `toast ${type}`;
+  toast.classList.remove('hidden');
+  setTimeout(() => toast.classList.add('hidden'), 3000);
+}
+
+async function getActiveChatGPTTab() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab || (!String(tab.url || '').includes('chat.openai.com') && !String(tab.url || '').includes('chatgpt.com'))) {
+    return null;
+  }
+  return tab;
+}
+
+async function loadSettings() {
+  const result = await chrome.storage.local.get([
+    'folderAuthState',
+    'folderDisplayName',
+    'folderLastFailureReason',
+    'isAuthorized',
+    'savePath',
+    'savedCount',
+    'exportFormats'
+  ]);
+  const folder = normalizeFolderState(result);
+  if (folder.folderAuthState === 'granted' && folder.folderDisplayName) {
+    showMainSection(folder.folderDisplayName);
+    savedCount.textContent = result.savedCount || 0;
+  } else if (folder.folderDisplayName && folder.folderLastFailureReason === 'permission_required') {
+    // 浏览器重启后权限被降级，handle 还在 IndexedDB 里，引导走 requestPermission 而非重新选
+    showSetupSection(
+      `浏览器重启后需要重新确认对「${folder.folderDisplayName}」的访问权限。点击下方按钮恢复访问，无需重新选择文件夹。`,
+      { mode: 'restore', folderName: folder.folderDisplayName }
+    );
+  } else {
+    showSetupSection(folder.folderAuthState === 'stale'
+      ? '保存文件夹已失效，请重新选择后再继续自动保存、手动导出和上下文延续。'
+      : '首次使用需要选择一个文件夹来保存对话记录。');
+  }
+
+  if (result.exportFormats) {
+    exportHtml.checked = result.exportFormats.html !== false;
+    exportMd.checked = result.exportFormats.md !== false;
+    exportPdf.checked = result.exportFormats.pdf !== false;
+    exportJson.checked = result.exportFormats.json !== false;
   }
 }
 
-// 更新 setupSection 为已授权状态的显示
-function updateSetupSectionForAuthorized(folderName) {
-  const welcomeCard = document.querySelector('.welcome-card');
-  const welcomeIcon = welcomeCard.querySelector('.welcome-icon');
-  const welcomeTitle = welcomeCard.querySelector('h2');
-  const welcomeDesc = welcomeCard.querySelector('p');
-  
-  welcomeIcon.textContent = '✅';
-  welcomeTitle.textContent = '已设置保存位置';
-  welcomeDesc.textContent = `对话将自动保存到「${folderName}」文件夹`;
-  
-  // 更新按钮显示
-  authorizeBtn.innerHTML = `<span class="btn-icon">📂</span> ${folderName}`;
-  authorizeBtn.classList.remove('btn-primary');
-  authorizeBtn.classList.add('btn-secondary');
-}
-
-// 重置 setupSection 为未授权状态
-function resetSetupSection() {
-  const welcomeCard = document.querySelector('.welcome-card');
-  const welcomeIcon = welcomeCard.querySelector('.welcome-icon');
-  const welcomeTitle = welcomeCard.querySelector('h2');
-  const welcomeDesc = welcomeCard.querySelector('p');
-  
-  welcomeIcon.textContent = '👋';
-  welcomeTitle.textContent = '欢迎使用';
-  welcomeDesc.textContent = '首次使用需要选择一个文件夹来保存对话记录。';
-  
-  authorizeBtn.innerHTML = `<span class="btn-icon">📂</span> 选择保存文件夹`;
-  authorizeBtn.classList.remove('btn-secondary');
-  authorizeBtn.classList.add('btn-primary');
-}
-
-// 更新状态
 async function updateStatus() {
   try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab && (tab.url.includes('chat.openai.com') || tab.url.includes('chatgpt.com'))) {
+    const tab = await getActiveChatGPTTab();
+    if (tab) {
       statusText.textContent = '监听中';
       statusText.className = 'status-badge status-active';
     } else {
@@ -101,122 +128,113 @@ async function updateStatus() {
   }
 }
 
-// 显示设置界面
-function showSetupSection() {
-  setupSection.classList.remove('hidden');
-  mainSection.classList.add('hidden');
-}
-
-// 显示主界面
-function showMainSection() {
-  setupSection.classList.add('hidden');
-  mainSection.classList.remove('hidden');
-}
-
-// 显示提示
-function showToast(message, type = 'success') {
-  toast.textContent = message;
-  toast.className = `toast ${type}`;
-  toast.classList.remove('hidden');
-  
-  setTimeout(() => {
-    toast.classList.add('hidden');
-  }, 3000);
-}
-
-// 检查是否在 ChatGPT 页面
-async function isOnChatGPTPage() {
+async function requestFolderAccess() {
+  const tab = await getActiveChatGPTTab();
+  if (!tab) {
+    showToast('请先打开 ChatGPT 页面', 'error');
+    return null;
+  }
   try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    return tab && (tab.url.includes('chat.openai.com') || tab.url.includes('chatgpt.com'));
+    return await chrome.tabs.sendMessage(tab.id, { action: 'requestFolderAccess' });
   } catch {
-    return false;
+    showToast('页面正在加载，请稍后重试', 'error');
+    return null;
   }
 }
 
-// 授权文件夹
-authorizeBtn.addEventListener('click', async () => {
+async function restoreFolderPermission() {
+  const tab = await getActiveChatGPTTab();
+  if (!tab) {
+    showToast('请先打开 ChatGPT 页面', 'error');
+    return null;
+  }
   try {
-    // 检查是否在 ChatGPT 页面
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    
-    if (!tab || (!tab.url.includes('chat.openai.com') && !tab.url.includes('chatgpt.com'))) {
-      showToast('请先打开 ChatGPT 页面', 'error');
+    return await chrome.tabs.sendMessage(tab.id, { action: 'restoreFolderPermission' });
+  } catch {
+    showToast('页面正在加载，请稍后重试', 'error');
+    return null;
+  }
+}
+
+document.addEventListener('DOMContentLoaded', async () => {
+  await loadSettings();
+  await updateStatus();
+  setTimeout(loadTokenBudget, 600);
+});
+
+authorizeBtn.addEventListener('click', async () => {
+  // restore 模式优先调 restorePermission（不弹文件夹选择器，只弹小确认框）
+  // 若 restore 失败再回退到 requestFolderAccess
+  let response = null;
+  if (authorizeMode === 'restore') {
+    response = await restoreFolderPermission();
+    if (response && !response.success && !response.notFound && !response.unsupported) {
+      // 恢复失败但 handle 还在（如用户点了拒绝），不主动弹文件夹选择器，提示用户即可
+      showToast(response.error || '恢复访问失败，请重试', 'error');
       return;
     }
-    
-    // 尝试发送消息，并处理连接失败的情况
-    let response;
-    try {
-      response = await chrome.tabs.sendMessage(tab.id, { action: 'requestFolderAccess' });
-    } catch (sendError) {
-      // content script 还没加载完成
-      console.log('等待页面加载...', sendError.message);
-      showToast('页面正在加载，请稍后重试', 'error');
-      return;
+    if (response?.notFound) {
+      // IndexedDB 里没有可恢复的 handle，回退到正常选择流程
+      response = await requestFolderAccess();
     }
-    
-    if (response && response.success) {
-      const folderName = response.folderName || 'ChatGPT-Backup';
-      await chrome.storage.local.set({ 
-        isAuthorized: true, 
-        savePath: folderName
-      });
-      
-      // 更新 setupSection 状态
-      updateSetupSectionForAuthorized(folderName);
-      
-      showMainSection();
-      savePath.textContent = folderName;
-      showToast('文件夹授权成功！');
-    } else if (response?.unsupported) {
-      // API 不支持，显示更友好的提示
-      showToast('浏览器不支持文件保存，请使用最新版Chrome/Edge', 'error');
-    } else {
-      showToast(response?.error || '授权失败，请重试', 'error');
-    }
-  } catch (error) {
-    console.log('授权操作异常:', error.message);
-    showToast('操作失败，请重试', 'error');
+  } else {
+    response = await requestFolderAccess();
+  }
+
+  if (response?.success) {
+    const folderName = response.folderState?.folderDisplayName || response.folderName || 'ChatGPT-Backup';
+    showMainSection(folderName);
+    showToast(authorizeMode === 'restore' ? '已恢复对原文件夹的访问！' : '文件夹授权成功！');
+  } else if (response?.unsupported) {
+    showToast('浏览器不支持文件保存，请使用最新版Chrome/Edge', 'error');
+  } else if (response) {
+    showToast(response.error || '授权失败，请重试', 'error');
   }
 });
 
-// 更换文件夹
 changeFolderBtn.addEventListener('click', async () => {
-  authorizeBtn.click();
+  // 主动更换文件夹：始终走 picker，不要走 restore
+  const response = await requestFolderAccess();
+  if (response?.success) {
+    const folderName = response.folderState?.folderDisplayName || response.folderName || 'ChatGPT-Backup';
+    showMainSection(folderName);
+    showToast('已更换保存文件夹');
+  } else if (response?.unsupported) {
+    showToast('浏览器不支持文件保存，请使用最新版Chrome/Edge', 'error');
+  } else if (response) {
+    showToast(response.error || '更换失败，请重试', 'error');
+  }
 });
 
-// 立即导出
 exportNowBtn.addEventListener('click', async () => {
+  const tab = await getActiveChatGPTTab();
+  if (!tab) {
+    showToast('请先打开 ChatGPT 页面', 'error');
+    return;
+  }
+
+  const formats = {
+    html: exportHtml.checked,
+    md: exportMd.checked,
+    pdf: exportPdf.checked,
+    json: exportJson.checked
+  };
+
   try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    
-    if (!tab || (!tab.url.includes('chat.openai.com') && !tab.url.includes('chatgpt.com'))) {
-      showToast('请先打开 ChatGPT 页面', 'error');
-      return;
-    }
-    
-    const formats = {
-      html: exportHtml.checked,
-      md: exportMd.checked,
-      pdf: exportPdf.checked,
-      json: exportJson.checked
-    };
-    
-    const response = await chrome.tabs.sendMessage(tab.id, { 
-      action: 'exportNow',
-      formats: formats
-    });
-    
-    if (response && response.success) {
-      showToast('导出成功！');
-      // 更新保存计数
-      const result = await chrome.storage.local.get(['savedCount']);
-      const newCount = (result.savedCount || 0) + 1;
-      await chrome.storage.local.set({ savedCount: newCount });
-      savedCount.textContent = newCount;
+    const response = await chrome.tabs.sendMessage(tab.id, { action: 'exportNow', formats });
+    if (response?.success) {
+      showToast(response.skipped ? '没有新内容，无需导出' : '导出成功！');
+      if (!response.skipped && Array.isArray(response.saved) && response.saved.length > 0) {
+        const result = await chrome.storage.local.get(['savedCount']);
+        const next = (result.savedCount || 0) + 1;
+        await chrome.storage.local.set({ savedCount: next });
+        savedCount.textContent = next;
+      }
     } else {
       showToast(response?.error || '导出失败', 'error');
+      if (response?.folderState?.folderAuthState && response.folderState.folderAuthState !== 'granted') {
+        await loadSettings();
+      }
     }
   } catch (error) {
     console.error('导出失败:', error);
@@ -224,8 +242,7 @@ exportNowBtn.addEventListener('click', async () => {
   }
 });
 
-// 保存导出格式设置
-[exportHtml, exportMd, exportPdf, exportJson].forEach(checkbox => {
+[exportHtml, exportMd, exportPdf, exportJson].forEach((checkbox) => {
   checkbox.addEventListener('change', async () => {
     const formats = {
       html: exportHtml.checked,
@@ -234,55 +251,28 @@ exportNowBtn.addEventListener('click', async () => {
       json: exportJson.checked
     };
     await chrome.storage.local.set({ exportFormats: formats });
-    
-    // 通知 content script 更新设置
     try {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (tab) {
-        chrome.tabs.sendMessage(tab.id, { action: 'updateFormats', formats: formats });
-      }
-    } catch (error) {
-      // 忽略错误
+      const tab = await getActiveChatGPTTab();
+      if (tab) await chrome.tabs.sendMessage(tab.id, { action: 'updateFormats', formats });
+    } catch {
+      // ignore
     }
   });
 });
 
-
-// Token 预算显示
 async function loadTokenBudget() {
   try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab || (!tab.url.includes('chat.openai.com') && !tab.url.includes('chatgpt.com'))) {
-      return;
-    }
-
-    let response;
-    try {
-      response = await chrome.tabs.sendMessage(tab.id, { action: 'getWorkspaceTokenStats' });
-    } catch (e) {
-      return;
-    }
-
-    if (response && response.workspace) {
-      const wsEl = document.getElementById('token-workspace');
-      const consumedEl = document.getElementById('token-consumed');
-      const progressEl = document.getElementById('token-progress');
-
-      wsEl.textContent = response.workspace;
-      consumedEl.textContent = response.consumed.toLocaleString();
-
-      // 简单进度条（基于估算上限）
-      const maxTokens = 100000; // 默认 100k 上限
-      const pct = Math.min(100, (response.consumed / maxTokens) * 100);
-      progressEl.style.width = pct + '%';
-      progressEl.style.background = pct > 80 ? '#ef4444' : pct > 50 ? '#f59e0b' : '#10a37f';
-    }
-  } catch (e) {
-    // 静默失败
+    const tab = await getActiveChatGPTTab();
+    if (!tab) return;
+    const response = await chrome.tabs.sendMessage(tab.id, { action: 'getWorkspaceTokenStats' });
+    if (!response?.workspace) return;
+    document.getElementById('token-workspace').textContent = response.workspace;
+    document.getElementById('token-consumed').textContent = response.consumed.toLocaleString();
+    const progressEl = document.getElementById('token-progress');
+    const pct = Math.min(100, (response.consumed / 100000) * 100);
+    progressEl.style.width = `${pct}%`;
+    progressEl.style.background = pct > 80 ? '#ef4444' : (pct > 50 ? '#f59e0b' : '#10a37f');
+  } catch {
+    // ignore
   }
 }
-
-// 页面加载后获取 token 数据
-document.addEventListener('DOMContentLoaded', () => {
-  setTimeout(loadTokenBudget, 600);
-});

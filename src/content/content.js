@@ -26,17 +26,17 @@
     autoSave: true,
     formats: { html: true, md: true, pdf: true, json: true },
     showLogPanel: true,
-    pdfExportMode: 'structured',
+    pdfExportMode: 'structured_auto',
     debounceDelay: 2000,
-    currentVersion: '3.1',
+    currentVersion: '2.0.1',
     cardKeyApiBase: 'https://seat.20050225.xyz'
   };
 
   function normalizePdfMode(mode) {
     const raw = String(mode || '').trim().toLowerCase();
     if (raw === 'visual') return 'visual';
-    if (raw === 'html_print') return 'html_print';
-    return 'structured';
+    if (raw === 'structured') return 'structured';
+    return 'structured_auto';
   }
 
   const AccessManager = window.ChatGPTSaver.AccessManager;
@@ -176,15 +176,22 @@
           return { valid: true, data: normalized, message: json?.message || '' };
         }
 
-        if (clearOnInvalid) {
+        // 网络错误：不清本地缓存，让下一次复检自然恢复。
+        // 业务真返回失败（authorized:false 且非 network_error）才进入 clearOnInvalid 分支。
+        const isNetworkError = json?.network_error === true;
+        if (clearOnInvalid && !isNetworkError) {
           await this.clearCardData();
           if (typeof UI !== 'undefined' && UI.updateCardKeyBadge) {
             UI.updateCardKeyBadge();
           }
         }
-        return { valid: false, message: json?.message || '卡密校验失败' };
+        return {
+          valid: false,
+          networkError: isNetworkError,
+          message: json?.message || '卡密校验失败'
+        };
       } catch (e) {
-        return { valid: false, message: '网络错误，无法验证卡密' };
+        return { valid: false, networkError: true, message: '网络错误，无法验证卡密' };
       }
     },
 
@@ -871,6 +878,7 @@
     logContent: null,
     toast: null,
     toastTimer: null,
+    guideCard: null,
     aboutLoaded: false,
 
     init() {
@@ -1130,6 +1138,31 @@
         .saver-about-notice a:hover { text-decoration: underline; }
         .saver-about-action-row { display: flex; gap: 8px; }
         .saver-about-action-row .saver-action-btn { margin-bottom: 0; }
+        .saver-guide-card {
+          border: 1px solid rgba(16,163,127,0.18);
+          border-radius: 12px;
+          background: linear-gradient(135deg, rgba(16,163,127,0.10) 0%, rgba(59,130,246,0.08) 100%);
+          padding: 12px;
+          margin-bottom: 12px;
+        }
+        .saver-guide-card[hidden] { display: none !important; }
+        .saver-guide-badge {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          padding: 4px 10px;
+          border-radius: 999px;
+          background: rgba(16,163,127,0.14);
+          color: var(--saver-text);
+          font-size: 11px;
+          font-weight: 700;
+          margin-bottom: 8px;
+        }
+        .saver-guide-title { font-size: 14px; font-weight: 700; color: var(--saver-text); margin-bottom: 6px; }
+        .saver-guide-text { font-size: 12px; line-height: 1.7; color: var(--saver-sub-text); margin-bottom: 10px; }
+        .saver-guide-meta { font-size: 11px; color: var(--saver-sub-text); margin-bottom: 10px; opacity: 0.9; }
+        .saver-guide-actions { display: flex; gap: 8px; }
+        .saver-guide-actions .saver-action-btn { margin-bottom: 0; font-size: 12px; padding: 9px 10px; }
         .saver-context-status { font-size: 12px; color: var(--saver-sub-text); text-align: center; padding: 16px 12px; line-height: 1.6; }
         .saver-cardkey-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 100000; }
         .saver-cardkey-dialog { background: var(--saver-bg, #fff); border-radius: 16px; padding: 32px 24px; width: 340px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; text-align: center; color: var(--saver-text, #333); }
@@ -1295,6 +1328,16 @@
         </div>
         <div class="saver-tab-content active" id="saver-tab-save">
           <div class="saver-panel-content">
+            <div class="saver-guide-card" id="saver-guide-card" hidden>
+              <div class="saver-guide-badge">${iconLabel('info', '新用户先看')}</div>
+              <div class="saver-guide-title">先花 1 分钟看一下使用说明</div>
+              <div class="saver-guide-text">建议先了解 4 个步骤：选择保存文件夹、确认自动保存、了解历史文件补抓、知道上传文件会先暂存后补存。</div>
+              <div class="saver-guide-meta" id="saver-guide-meta">首次安装建议先看一次，后续可在关于页再次打开。</div>
+              <div class="saver-guide-actions">
+                <button class="saver-action-btn" id="saver-guide-open">查看使用说明</button>
+                <button class="saver-action-btn secondary" id="saver-guide-dismiss">知道了</button>
+              </div>
+            </div>
             <div style="font-size: 12px; color: var(--saver-sub-text); margin-bottom: 8px; font-weight: 600;">${iconLabel('chart', '模型用量 / 风控')} <span id="saver-usage-workspace" style="font-weight: 400; opacity: 0.8;"></span></div>
             <div style="display:flex;gap:6px;margin-bottom:8px;">
               <select id="saver-account-type" style="flex:1;padding:6px 8px;border:1px solid var(--saver-border);border-radius:8px;background:var(--saver-format-bg);color:var(--saver-text);font-size:11px;">
@@ -1319,7 +1362,7 @@
             <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;">
               <span style="font-size:12px;color:var(--saver-sub-text);">PDF 导出模式</span>
               <select id="saver-pdf-mode" style="flex:1;max-width:180px;padding:6px 8px;border:1px solid var(--saver-border);border-radius:8px;background:var(--saver-format-bg);color:var(--saver-text);font-size:12px;">
-                <option value="html_print">HTML原样（推荐）</option>
+                <option value="structured_auto">自动结构化（推荐）</option>
                 <option value="structured">结构化（代码/表格/公式）</option>
                 <option value="visual">视觉还原（画布截图）</option>
               </select>
@@ -1333,6 +1376,7 @@
               </div>
             </div>
             <button class="saver-action-btn secondary" id="saver-select-folder">${iconLabel('folder', '选择保存文件夹')}</button>
+            <button class="saver-action-btn secondary" id="saver-collect-generated">${iconLabel('refresh', '补抓当前会话历史文件')}</button>
             <div class="saver-divider"></div>
             <div id="saver-folder-status" style="margin-bottom: 8px; font-size: 12px; color: var(--saver-sub-text);">
               保存位置: <span id="saver-folder-name" style="color: var(--saver-active-color);">未设置</span>
@@ -1415,6 +1459,7 @@
               <div id="saver-about-notice" class="saver-about-notice">加载中...</div>
             </div>
             <div class="saver-about-action-row">
+              <button class="saver-action-btn secondary" id="saver-about-guide">使用说明</button>
               <button class="saver-action-btn" id="saver-about-upgrade" disabled>一键激活</button>
               <button class="saver-action-btn secondary" id="saver-about-refresh">刷新公告</button>
             </div>
@@ -1429,6 +1474,7 @@
       this.logTitle = document.getElementById('saver-log-title');
       this.logContent = document.getElementById('saver-log-content');
       this.logArrow = document.getElementById('saver-log-arrow');
+      this.guideCard = document.getElementById('saver-guide-card');
 
       // 点击日志头部展开/收起详细日志
       this.logHeader.onclick = () => {
@@ -1512,6 +1558,8 @@
         const unavailableMessage = AccessManager.getUnavailableMessage();
         if (!AccessManager.canUseNow()) { this.showCardKeyOverlay(unavailableMessage); return; }
         if (!window.ChatGPTSaver.Exporter.canExport()) { this.showToast('没有可导出的内容', 'error'); return; }
+        const folderReady = await ensureFolderReadyOrPrompt({ interactive: true, reason: 'manual_export' });
+        if (!folderReady.ready) return;
         this.showToast('💾 正在导出...', 'saving', 0);
         const result = await window.ChatGPTSaver.Exporter.exportConversation(
           config.formats,
@@ -1543,6 +1591,8 @@
       document.getElementById('saver-export-selected').onclick = async () => {
         const unavailableMessage = AccessManager.getUnavailableMessage();
         if (!AccessManager.canUseNow()) { this.showCardKeyOverlay(unavailableMessage); return; }
+        const folderReady = await ensureFolderReadyOrPrompt({ interactive: true, reason: 'selection_export' });
+        if (!folderReady.ready) return;
         const sm = window.ChatGPTSaver.SelectionManager;
         if (!sm || sm.selectedCount() === 0) return;
         const allMessages = window.ChatGPTSaver.Parser.parseConversation().messages;
@@ -1570,11 +1620,58 @@
       document.getElementById('saver-select-folder').onclick = async () => {
         const result = await window.ChatGPTSaver.FileSystem.requestFolderAccess();
         if (result.success) {
-          this.updateFolderStatus(result.folderName);
-          chrome.storage.local.set({ isAuthorized: true, savePath: result.folderName });
-          this.showToast('✅ 文件夹已设置', 'success');
+          await syncFolderUiFromState(result.folderState || null);
+          const flushResult = await flushPendingUploads('manual_folder_pick', { showToast: false });
+          const restoredCount = Number(flushResult?.flushedCount || 0) || 0;
+          this.showToast(restoredCount > 0 ? `✅ 文件夹已设置，已补存 ${restoredCount} 个暂存附件` : '✅ 文件夹已设置', 'success');
+          ContextManager.refreshList();
         } else if (!result.unsupported) {
           this.showToast(result.error || '选择失败', 'error');
+        }
+      };
+
+      document.getElementById('saver-collect-generated').onclick = async () => {
+        const folderReady = await ensureFolderReadyOrPrompt({ interactive: true, reason: 'collect_generated' });
+        if (!folderReady.ready) return;
+        window.ChatGPTSaver.Logger?.showPanel?.();
+        window.ChatGPTSaver.Logger?.status?.('loading', '正在补抓历史文件...');
+        window.ChatGPTSaver.Logger?.add?.('开始检查当前会话中的历史文件候选（上传文件 + GPT 生成文件）...');
+        this.showToast('📎 正在补抓历史文件...', 'saving', 0);
+        const result = await window.ChatGPTSaver.ConversationAssets.collectConversationAssets({ debug: true, historicalProbe: true });
+        if (result?.success) {
+          const savedUploads = Array.isArray(result.savedUploads) ? result.savedUploads.length : 0;
+          const failedUploads = Array.isArray(result.failedUploads) ? result.failedUploads.length : 0;
+          const savedGenerated = Array.isArray(result.savedGenerated) ? result.savedGenerated.length : 0;
+          const failedGenerated = Array.isArray(result.failedGenerated) ? result.failedGenerated.length : 0;
+          const savedCount = savedUploads + savedGenerated;
+          const failedCount = failedUploads + failedGenerated;
+          if (failedCount > 0) {
+            const failedItems = []
+              .concat(result.failedUploads || [])
+              .concat(result.failedGenerated || []);
+            failedItems.forEach((item, index) => {
+              window.ChatGPTSaver.Logger?.add?.(`失败 ${index + 1}：${item.name || '未知文件'} -> ${item.error || 'unknown_error'}`);
+            });
+          }
+          if (savedCount > 0) {
+            window.ChatGPTSaver.Logger?.status?.(failedCount > 0 ? 'error' : 'success', failedCount > 0
+              ? `补抓完成：成功 ${savedCount} 个，失败 ${failedCount} 个`
+              : `补抓完成：已恢复 ${savedCount} 个文件`);
+            this.showToast(`✅ 已补抓 ${savedCount} 个历史文件（上传 ${savedUploads}，生成 ${savedGenerated}）${failedCount ? `，另有 ${failedCount} 个未恢复` : ''}`, 'success', 3000);
+          } else {
+            const noUploadCandidates = (!result.savedUploads?.length && !result.failedUploads?.length);
+            const noGeneratedCandidates = result?.diagnostics?.reason === 'no_candidates' || (!result.savedGenerated?.length && !result.failedGenerated?.length);
+            window.ChatGPTSaver.Logger?.status?.(failedCount > 0 ? 'error' : 'success', (noUploadCandidates && noGeneratedCandidates)
+              ? '补抓完成：未检测到可补抓候选'
+              : `补抓完成：成功 0 个，失败 ${failedCount} 个`);
+            this.showToast(failedCount
+              ? `⚠️ 未恢复成功，可重试 (${failedCount} 个)`
+              : '没有检测到可补抓的历史文件', failedCount ? 'error' : 'info', 3000);
+          }
+          ContextManager.refreshList();
+        } else {
+          window.ChatGPTSaver.Logger?.status?.('error', `补抓失败：${result?.error || '未知错误'}`);
+          this.showToast('❌ 历史文件补抓失败', 'error', 3000);
         }
       };
 
@@ -1666,7 +1763,23 @@
         };
       }
 
+      const guideOpenBtn = document.getElementById('saver-guide-open');
+      if (guideOpenBtn) {
+        guideOpenBtn.onclick = () => this.openGuidePage();
+      }
+
+      const guideDismissBtn = document.getElementById('saver-guide-dismiss');
+      if (guideDismissBtn) {
+        guideDismissBtn.onclick = () => this.dismissGuideBanner();
+      }
+
+      const aboutGuideBtn = document.getElementById('saver-about-guide');
+      if (aboutGuideBtn) {
+        aboutGuideBtn.onclick = () => this.openGuidePage();
+      }
+
       this.refreshFeatureQuotaIndicators();
+      void this.refreshGuideBanner();
 
     },
 
@@ -1677,6 +1790,51 @@
         main.style.transition = 'margin-right 0.3s ease';
         main.style.marginRight = isShowing ? this.panel.style.width || '320px' : '';
       }
+      if (isShowing) void this.refreshGuideBanner();
+    },
+
+    async refreshGuideBanner() {
+      const card = this.guideCard || document.getElementById('saver-guide-card');
+      if (!card) return;
+      try {
+        const state = await chrome.storage.local.get(['guideBannerDismissed', 'guideLastViewedAt']);
+        const dismissed = state?.guideBannerDismissed === true;
+        card.hidden = dismissed;
+        const metaEl = document.getElementById('saver-guide-meta');
+        if (metaEl) {
+          metaEl.textContent = state?.guideLastViewedAt
+            ? '你已经查看过说明，后续仍可在这里或“关于”页重新打开。'
+            : '首次安装建议先看一次，后续可在关于页再次打开。';
+        }
+      } catch {
+        card.hidden = false;
+      }
+    },
+
+    async openGuidePage() {
+      try {
+        await chrome.runtime.sendMessage({ action: 'openGuidePage' });
+        await chrome.storage.local.set({ guideLastViewedAt: new Date().toISOString() });
+        await this.refreshGuideBanner();
+      } catch (error) {
+        console.warn('[ChatGPT Saver] 打开使用说明失败:', error?.message || error);
+        try {
+          window.open(chrome.runtime.getURL('src/help/guide.html'), '_blank', 'noopener,noreferrer');
+          await chrome.storage.local.set({ guideLastViewedAt: new Date().toISOString() });
+          await this.refreshGuideBanner();
+        } catch {
+          this.showToast('打开使用说明失败，请稍后重试', 'error', 3000);
+        }
+      }
+    },
+
+    async dismissGuideBanner() {
+      try {
+        await chrome.storage.local.set({ guideBannerDismissed: true });
+      } catch {
+        // ignore
+      }
+      if (this.guideCard) this.guideCard.hidden = true;
     },
 
     // 显示卡密输入弹窗
@@ -1763,17 +1921,23 @@
       };
 
       const getSuccessMessageByCardType = () => {
-        if (CardKeyManager.isDaypass()) return '✅ 日抛卡已激活';
-        if (CardKeyManager.isUnlimited()) return '✅ 无限版已激活';
-        return '✅ 时长卡已激活';
+        const days = CardKeyManager.getRemainingDays?.();
+        const expiryTs = CardKeyManager.getExpiryTimestamp?.();
+        let remainDays = null;
+        if (expiryTs && expiryTs > Date.now()) {
+          remainDays = Math.max(1, Math.ceil((expiryTs - Date.now()) / (24 * 60 * 60 * 1000)));
+        } else if (days !== null && days !== undefined) {
+          remainDays = Math.max(0, Math.ceil(days));
+        }
+        return remainDays !== null ? `✅ 激活码已激活 · 剩余 ${remainDays} 天` : '✅ 激活码已激活';
       };
 
       const normalizeFailureMessage = (text) => {
         const raw = String(text || '').trim();
-        if ((CardKeyManager.isDaypass() || /日抛|daypass/i.test(raw)) && /过期|到期|expired/i.test(raw)) {
-          return '日抛卡已到期，请重新激活';
+        if (/过期|到期|expired/i.test(raw)) {
+          return '激活码已到期，请重新激活';
         }
-        return raw || '卡密无效';
+        return raw || '激活码无效';
       };
 
       const onSuccess = async () => {
@@ -1857,37 +2021,36 @@
       const expiryTs = CardKeyManager.getExpiryTimestamp();
       badge.style.display = 'inline-block';
 
-      if (CardKeyManager.isUnlimited()) {
-        badge.textContent = '🔑 无限版';
-        badge.style.color = '';
+      // 统一按剩余天数显示，不再区分"无限版"等卡型
+      // 仅日抛卡在剩余 ≤24h 时降级显示为小时，提高紧迫感
+      const remainMs = expiryTs && expiryTs > now ? expiryTs - now : null;
+
+      if (remainMs !== null && CardKeyManager.isDaypass() && remainMs <= 24 * 60 * 60 * 1000) {
+        const remainHours = Math.max(1, Math.ceil(remainMs / (60 * 60 * 1000)));
+        badge.textContent = `🔑 剩余 ${remainHours} 小时`;
+        badge.style.color = '#ef4444';
+        this.refreshFeatureQuotaIndicators();
         return;
       }
 
-      if (CardKeyManager.isDaypass()) {
-        const remainMs = Math.max(0, (expiryTs || now) - now);
-        if (remainMs <= 24 * 60 * 60 * 1000) {
-          const remainHours = Math.max(1, Math.ceil(remainMs / (60 * 60 * 1000)));
-          badge.textContent = `🕒 日抛 剩余 ${remainHours} 小时`;
-          badge.style.color = '#ef4444';
-          return;
-        }
-
-        const remainDays = Math.max(1, Math.ceil(remainMs / (24 * 60 * 60 * 1000)));
-        badge.textContent = `🕒 日抛 剩余 ${remainDays} 天`;
-        badge.style.color = remainDays <= 3 ? '#ef4444' : '';
-        return;
-      }
-
-      const remainByDate = expiryTs && expiryTs > now
-        ? Math.max(1, Math.ceil((expiryTs - now) / (24 * 60 * 60 * 1000)))
+      const remainByDate = remainMs !== null
+        ? Math.max(1, Math.ceil(remainMs / (24 * 60 * 60 * 1000)))
         : null;
       const remainDays = remainByDate ?? (days !== null ? Math.max(0, Math.ceil(days)) : null);
+
       if (remainDays === null) {
         badge.style.display = 'none';
         return;
       }
+
       badge.textContent = `🔑 剩余 ${remainDays} 天`;
-      badge.style.color = remainDays <= 3 ? '#ef4444' : '';
+      if (remainDays <= 3) {
+        badge.style.color = '#ef4444';
+      } else if (remainDays <= 7) {
+        badge.style.color = '#f59e0b';
+      } else {
+        badge.style.color = '';
+      }
       this.refreshFeatureQuotaIndicators();
     },
 
@@ -1906,10 +2069,17 @@
     updateFolderStatus(name) {
       const el = document.getElementById('saver-folder-name');
       if (el) {
-        const safeName = this._escapeHtml(name || '');
-        el.innerHTML = name
-          ? `${uiIcon('folder', 'sm')} <span>${safeName}</span>`
-          : '未设置';
+        el.textContent = '';
+        if (name) {
+          const iconWrap = document.createElement('span');
+          iconWrap.innerHTML = uiIcon('folder', 'sm');
+          const text = document.createElement('span');
+          text.textContent = ` ${String(name || '')}`;
+          el.appendChild(iconWrap.firstChild);
+          el.appendChild(text);
+        } else {
+          el.textContent = '未设置';
+        }
       }
     },
 
@@ -1938,9 +2108,51 @@
       const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
       const item = document.createElement('div');
       item.className = 'saver-log-item-inline';
-      item.innerHTML = `<span class="saver-log-time-inline">${time}</span>${message}`;
+      const timeEl = document.createElement('span');
+      timeEl.className = 'saver-log-time-inline';
+      timeEl.textContent = time;
+      item.appendChild(timeEl);
+      item.appendChild(document.createTextNode(String(message)));
       this.logContent.appendChild(item);
       this.logContent.scrollTop = this.logContent.scrollHeight;
+    },
+
+    showFolderRequiredOverlay() {
+      let overlay = document.getElementById('saver-folder-required-overlay');
+      if (overlay) return;
+      overlay = document.createElement('div');
+      overlay.id = 'saver-folder-required-overlay';
+      overlay.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,0.56);display:flex;align-items:center;justify-content:center;z-index:100000;';
+      overlay.innerHTML = `
+        <div style="background:#fff;padding:24px;border-radius:14px;max-width:420px;width:calc(100vw - 32px);box-shadow:0 24px 60px rgba(15,23,42,0.24);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+          <div style="font-size:18px;font-weight:700;color:#111827;margin-bottom:12px;">保存文件夹需要重新选择</div>
+          <div style="font-size:14px;line-height:1.7;color:#4b5563;margin-bottom:18px;">检测到未设置或已失效的保存文件夹。请选择保存文件夹后，才能继续自动保存、手动导出和上下文延续。</div>
+          <div style="display:flex;gap:10px;justify-content:flex-end;">
+            <button id="saver-folder-required-action" style="background:#10a37f;color:#fff;border:none;border-radius:8px;padding:10px 16px;font-size:14px;cursor:pointer;">选择保存文件夹</button>
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+      const actionBtn = overlay.querySelector('#saver-folder-required-action');
+      if (actionBtn) {
+        actionBtn.addEventListener('click', async () => {
+          const result = await window.ChatGPTSaver.FileSystem.requestFolderAccess();
+          if (result?.success) {
+            this.hideFolderRequiredOverlay();
+            this.updateFolderStatus(result.folderState?.folderDisplayName || result.folderName || '已授权');
+            const flushResult = await flushPendingUploads('overlay_folder_pick', { showToast: false });
+            const restoredCount = Number(flushResult?.flushedCount || 0) || 0;
+            this.showToast(restoredCount > 0 ? `✅ 文件夹已设置，已补存 ${restoredCount} 个暂存附件` : '✅ 文件夹已设置', 'success');
+            if (config.autoSave) startAutoSave();
+            ContextManager.refreshList();
+          } else if (!result?.unsupported) {
+            this.showToast(result?.error || '选择失败', 'error');
+          }
+        });
+      }
+    },
+
+    hideFolderRequiredOverlay() {
+      document.getElementById('saver-folder-required-overlay')?.remove();
     },
 
     setLogStatus(type, title) {
@@ -2525,6 +2737,7 @@
     add(msg) { UI.addLog(msg); },
     showPanel() { UI.showLog(); this.panelVisible = true; },
     hidePanel() { this.panelVisible = false; },
+    status(type, title) { UI.setLogStatus(type, title); },
     complete(title, msg) { UI.logComplete(title, msg); },
     fail(msg) { UI.logError(msg); }
   };
@@ -2533,29 +2746,12 @@
   // ==================== 附件管理器 ====================
   const AttachmentManager = {
     uploadInterceptorStarted: false,
-    fetchListenerStarted: false,
 
     init() {
+      window.ChatGPTSaver.ConversationAssets?.init?.();
       this.startUploadInterceptor();
-      this.startFetchListener();
     },
 
-    // 监听 fetchInterceptor 通过 postMessage 发来的文件上传通知
-    startFetchListener() {
-      if (this.fetchListenerStarted) return;
-      this.fetchListenerStarted = true;
-      window.addEventListener('message', async (event) => {
-        if (event.source !== window || !event.data) return;
-        if (event.data.type === 'SAVER_FILE_UPLOADED' && Array.isArray(event.data.files)) {
-          const files = event.data.files;
-          if (files.length === 0) return;
-          console.log(`[ChatGPT Saver] fetch 拦截到 ${files.length} 个文件上传`);
-          await this.interceptUploadedFiles(files);
-        }
-      });
-    },
-
-    // 监听用户上传文件，自动保存到对话的 attachments 文件夹
     startUploadInterceptor() {
       if (this.uploadInterceptorStarted) return;
       this.uploadInterceptorStarted = true;
@@ -2566,7 +2762,7 @@
           const files = target.files;
           if (files && files.length > 0) {
             console.log(`[ChatGPT Saver] 检测到用户上传 ${files.length} 个文件`);
-            await this.interceptUploadedFiles(files);
+            await this.interceptUploadedFiles(files, { source: 'input_change' });
           }
         }
       }, true);
@@ -2576,97 +2772,47 @@
           const dt = e.dataTransfer;
           if (dt && dt.files && dt.files.length > 0) {
             console.log(`[ChatGPT Saver] 检测到拖放上传 ${dt.files.length} 个文件`);
-            await this.interceptUploadedFiles(dt.files);
+            await this.interceptUploadedFiles(dt.files, { source: 'drag_drop' });
           }
         }, 100);
       }, true);
+
+      document.addEventListener('paste', async (e) => {
+        const files = e.clipboardData?.files;
+        if (files && files.length > 0) {
+          console.log(`[ChatGPT Saver] 检测到粘贴上传 ${files.length} 个文件`);
+          await this.interceptUploadedFiles(files, { source: 'clipboard_paste' });
+        }
+      }, true);
     },
 
-    async interceptUploadedFiles(fileList) {
-      const fs = window.ChatGPTSaver?.FileSystem;
-      if (!fs || !fs.isAuthorized()) return;
+    async interceptUploadedFiles(fileList, meta = {}) {
       try {
-        const parser = window.ChatGPTSaver.Parser;
-        const wsName = parser.getWorkspaceName() || '个人帐户';
-        const title = parser.getConversationTitle();
-        if (!title) return;
-        const sanitize = (n) => n.replace(/[/\\:*?"<>|]/g, '-').replace(/\s+/g, ' ').trim().substring(0, 100);
-        const rootHandle = await fs.getBackupRootHandle();
-        if (!rootHandle) return;
-        const wsFolder = await rootHandle.getDirectoryHandle(sanitize(wsName), { create: true });
-        const convFolder = await wsFolder.getDirectoryHandle(sanitize(title), { create: true });
-        const attFolder = await convFolder.getDirectoryHandle('attachments', { create: true });
-
-        let savedCount = 0;
-        // 去重：记录最近保存的文件名+大小，避免 change 事件和 fetch 拦截重复保存
-        if (!this._recentSaves) this._recentSaves = new Map();
-        const now = Date.now();
-        // 清理 30 秒前的记录
-        for (const [key, ts] of this._recentSaves) {
-          if (now - ts > 30000) this._recentSaves.delete(key);
+        const folderReady = await ensureFolderReadyOrPrompt({ interactive: false, reason: 'capture_upload', showOverlay: config.autoSave });
+        const result = await window.ChatGPTSaver.ConversationAssets.captureUploadedFiles(fileList, {
+          ...meta,
+          reason: 'capture_upload'
+        });
+        const savedCount = Array.isArray(result?.saved) ? result.saved.length : 0;
+        const stagedCount = Number(result?.stagedCount || 0) || 0;
+        if (savedCount > 0 && stagedCount > 0) {
+          UI.showToast(`📥 已保存 ${savedCount} 个附件，另有 ${stagedCount} 个已暂存待补存`, 'success', 3500);
+        } else if (savedCount > 0) {
+          UI.showToast(`📥 已自动保存 ${savedCount} 个附件`, 'success', 3000);
+        } else if (stagedCount > 0 || folderReady.ready === false) {
+          UI.showToast(`📦 已暂存 ${stagedCount || (fileList?.length || 0)} 个附件，文件夹就绪后会自动补存`, 'saving', 3500);
         }
-
-        for (const file of fileList) {
-          const dedupeKey = `${file.name}_${file.size}`;
-          if (this._recentSaves.has(dedupeKey)) {
-            console.log(`[ChatGPT Saver] 跳过重复附件: ${file.name}`);
-            continue;
-          }
-          try {
-            await fs.writeFile(attFolder, file.name, file, file.type);
-            savedCount++;
-            this._recentSaves.set(dedupeKey, now);
-            console.log(`[ChatGPT Saver] ✅ 附件已保存: ${file.name}`);
-          } catch (e) { console.error(`[ChatGPT Saver] 保存附件失败 ${file.name}:`, e); }
-        }
-        if (savedCount > 0) UI.showToast(`📥 已自动保存 ${savedCount} 个附件`, 'success', 3000);
       } catch (e) { console.log('[ChatGPT Saver] 拦截附件保存失败:', e.message); }
     },
 
-    // 扫描页面 DOM 中用户上传的附件名称
     scanAttachmentsFromDOM() {
-      const attachments = [];
-      const userMessages = document.querySelectorAll('[data-message-author-role="user"]');
-      for (const msgEl of userMessages) {
-        const container = msgEl.closest('[class*="group"]') || msgEl.closest('article') || msgEl.parentElement?.parentElement;
-        if (!container) continue;
-        // 查找带文件扩展名的文本元素
-        const textEls = container.querySelectorAll('[class*="truncate"], [class*="overflow-hidden"], [class*="text-ellipsis"], [class*="line-clamp"]');
-        for (const el of textEls) {
-          if (el.closest('[data-message-author-role="assistant"]') || el.closest('[class*="footnote"]') || el.closest('[class*="citation"]')) continue;
-          const text = el.textContent?.trim();
-          if (text && text.length < 200 && text.length > 2) {
-            if (text.match(/\.(doc|docx|pdf|txt|md|json|csv|xls|xlsx|ppt|pptx|zip|rar|png|jpg|jpeg|gif|py|js|ts|html|css|java|cpp|c|xml|yaml|yml)(\.\.\.)?$/i)) {
-              const cleanName = text.replace(/\.\.\.\s*$/, '').trim();
-              if (cleanName && !attachments.some(a => a.name === cleanName)) attachments.push({ name: cleanName });
-            }
-          }
-        }
-        // 查找附件特定选择器
-        const selectors = ['[data-testid="attachment"]', '[data-testid="file-thumbnail"]', 'a[download]'];
-        for (const sel of selectors) {
-          try {
-            for (const el of container.querySelectorAll(sel)) {
-              if (el.closest('[data-message-author-role="assistant"]')) continue;
-              let name = el.getAttribute('download') || el.getAttribute('alt') || el.getAttribute('title');
-              if (!name) { const t = el.textContent?.trim(); if (t && t.length < 100 && t.match(/\.[a-zA-Z0-9]{2,5}$/)) name = t; }
-              if (name) { name = name.replace(/\.\.\.\s*$/, '').trim(); if (!attachments.some(a => a.name === name)) attachments.push({ name }); }
-            }
-          } catch (e) { /* ignore */ }
-        }
-      }
-      return attachments;
+      return window.ChatGPTSaver.ConversationAssets.scanUploadCandidatesFromDOM();
     },
 
-    // 保存 DOM 检测到的附件（从 attachments 文件夹匹配或跳过）
-    async detectAndSaveAttachments(safeWs, safeTitle) {
-      const fs = window.ChatGPTSaver?.FileSystem;
-      if (!fs || !fs.isAuthorized()) return;
+    async detectAndSaveAttachments() {
       const detected = this.scanAttachmentsFromDOM();
-      if (detected.length === 0) return;
-      console.log(`[ChatGPT Saver] DOM 检测到 ${detected.length} 个附件`);
-      // attachments 文件夹已由 interceptUploadedFiles 创建，这里只做日志
-      UI.addLog?.(`📎 检测到 ${detected.length} 个附件`);
+      if (detected.length > 0) UI.addLog?.(`📎 检测到 ${detected.length} 个附件`);
+      return detected;
     }
   };
 
@@ -3041,7 +3187,8 @@
 
     async scanContextFiles() {
       const fs = window.ChatGPTSaver?.FileSystem;
-      if (!fs || !fs.isAuthorized()) return [];
+      const ready = await ensureFolderReadyOrPrompt({ interactive: false, reason: 'context_scan', showOverlay: true });
+      if (!fs || !ready.ready) return [];
       try {
         const rootHandle = await fs.getBackupRootHandle();
         if (!rootHandle) return [];
@@ -3063,17 +3210,17 @@
               }
             } catch (e) { /* no context folder */ }
             if (contextFiles.length === 0) continue;
-            // 扫描 attachments 文件夹
-            let attachmentHandles = [];
-            try {
-              const attFolder = await convHandle.getDirectoryHandle('attachments', { create: false });
-              for await (const attEntry of attFolder.values()) {
-                if (attEntry.kind === 'file') attachmentHandles.push(attEntry);
-              }
-            } catch (e) { /* no attachments folder */ }
-            // 智能匹配：排除所有上下文 JSON 文件名，只保留真正的附件
-            const ctxNames = new Set(contextFiles.map(f => f.name));
-            const relevantAttachments = attachmentHandles.filter(att => !ctxNames.has(att.name));
+            const assetHandles = [];
+            for (const dirName of ['uploads', 'generated', 'attachments']) {
+              try {
+                const assetFolder = await convHandle.getDirectoryHandle(dirName, { create: false });
+                for await (const assetEntry of assetFolder.values()) {
+                  if (assetEntry.kind === 'file') assetHandles.push(assetEntry);
+                }
+              } catch (e) { /* ignore */ }
+            }
+            const ctxNames = new Set(contextFiles.map((f) => f.name));
+            const relevantAttachments = assetHandles.filter((att) => !ctxNames.has(att.name));
             // 合并同一对话下的所有 JSON 上下文为一个条目
             files.push({
               workspace: wsEntry.name, conversation: convEntry.name,
@@ -3110,10 +3257,11 @@
       let html = '';
       Object.keys(groups).sort().forEach(ws => {
         const items = groups[ws];
+        const safeWs = UI._escapeHtml(ws);
         html += `<div class="saver-ws-group" data-ws="${ws}">
           <div class="saver-ws-header expanded">
             <span class="saver-ws-arrow">▶</span>
-            <span class="saver-inline-label">${uiIcon('folder', 'sm')}<span>${ws}</span></span>
+            <span class="saver-inline-label">${uiIcon('folder', 'sm')}<span>${safeWs}</span></span>
             <span class="saver-ws-count">${items.length}</span>
           </div>
           <div class="saver-ws-children">`;
@@ -3123,10 +3271,12 @@
           const metaParts = [];
           if (ctxCount > 1) metaParts.push(`${uiIcon('fileStack', 'xs')}${ctxCount} 个上下文`);
           if (attCount > 0) metaParts.push(`${uiIcon('paperclip', 'xs')}${attCount} 个附件`);
-          html += `<div class="saver-context-item" draggable="true" data-idx="${f._idx}" title="拖拽到 ChatGPT 对话框导入\n${f.workspace}/${f.conversation}${ctxCount > 1 ? '\n含 ' + ctxCount + ' 个上下文文件' : ''}${attCount ? '\n含 ' + attCount + ' 个附件' : ''}">
+          const safeConversation = UI._escapeHtml(f.conversation);
+          const safeTitle = UI._escapeHtml(`拖拽到 ChatGPT 对话框导入\n${f.workspace}/${f.conversation}${ctxCount > 1 ? '\n含 ' + ctxCount + ' 个上下文文件' : ''}${attCount ? '\n含 ' + attCount + ' 个附件' : ''}`);
+          html += `<div class="saver-context-item" draggable="true" data-idx="${f._idx}" title="${safeTitle}">
             <span class="ctx-icon">${attCount > 0 ? uiIcon('paperclip', 'sm') : uiIcon('file', 'sm')}</span>
             <div class="ctx-info">
-              <div class="ctx-title">${f.conversation}</div>
+              <div class="ctx-title">${safeConversation}</div>
               <div class="ctx-meta">${metaParts.join(' · ') || ''}</div>
             </div>
             <span class="ctx-drag-hint">⠿</span>
@@ -3144,6 +3294,11 @@
       // 绑定拖拽事件 — 让 JSON + 附件一起拖出到 ChatGPT 对话框
       listEl.querySelectorAll('.saver-context-item').forEach(item => {
         item.addEventListener('dragstart', async (e) => {
+          const folderReady = await ensureFolderReadyOrPrompt({ interactive: false, reason: 'context_drag', showOverlay: true });
+          if (!folderReady.ready) {
+            e.preventDefault();
+            return;
+          }
           const idx = parseInt(item.dataset.idx);
           const fileInfo = this._cachedFiles[idx];
           if (!fileInfo) return;
@@ -3170,6 +3325,8 @@
 
         // 点击也支持：上传所有 JSON + 附件到 ChatGPT
         item.addEventListener('click', async () => {
+          const folderReady = await ensureFolderReadyOrPrompt({ interactive: true, reason: 'context_click', showOverlay: true });
+          if (!folderReady.ready) return;
           const idx = parseInt(item.dataset.idx);
           const fileInfo = this._cachedFiles[idx];
           if (!fileInfo) return;
@@ -3462,12 +3619,13 @@
           const roleIcon = item.role === 'assistant' ? uiIcon('bot', 'sm') : uiIcon('user', 'sm');
           const isFav = this._isFavorite(item.messageId);
           const fav = isFav ? uiIcon('starFilled', 'sm') : uiIcon('star', 'sm');
+          const safeSnippet = UI._escapeHtml(item.snippet || '');
           return `
             <div class="saver-context-item saver-nav-item ${roleClass}" data-nav-message-id="${item.messageId}" data-nav-index="${item.index}">
               <span class="ctx-icon">${roleIcon}</span>
               <div class="ctx-info">
                 <div class="ctx-title">#${item.index + 1}</div>
-                <div class="ctx-meta">${item.snippet}</div>
+                <div class="ctx-meta">${safeSnippet}</div>
               </div>
               <button class="saver-nav-fav-btn${isFav ? ' active' : ''}" data-fav-id="${item.messageId}" data-fav-index="${item.index}" title="收藏 / 取消收藏">${fav}</button>
             </div>
@@ -3501,11 +3659,12 @@
         favEl.innerHTML = grouped.map(([convId, items]) => {
           if (!Array.isArray(items) || !items.length) return '';
           const title = items[0]?.conversationTitle || convId;
+          const safeTitle = UI._escapeHtml(title);
           return `
             <div class="saver-ws-group" data-conv-id="${convId}">
               <div class="saver-ws-header expanded">
                 <span class="saver-ws-arrow">▶</span>
-                <span class="saver-inline-label">${uiIcon('folderOpen', 'sm')}<span>${title}</span></span>
+                <span class="saver-inline-label">${uiIcon('folderOpen', 'sm')}<span>${safeTitle}</span></span>
                 <span class="saver-ws-count">${items.length}</span>
               </div>
               <div class="saver-ws-children">
@@ -3514,7 +3673,7 @@
                     <span class="ctx-icon">${item.role === 'assistant' ? uiIcon('bot', 'sm') : uiIcon('user', 'sm')}</span>
                     <div class="ctx-info">
                       <div class="ctx-title">#${(item.indexHint || 0) + 1}</div>
-                      <div class="ctx-meta">${item.snippet || ''}</div>
+                      <div class="ctx-meta">${UI._escapeHtml(item.snippet || '')}</div>
                     </div>
                   </div>
                 `).join('')}
@@ -3596,18 +3755,52 @@
   }
 
   async function tryRestoreFileAccess() {
-    const restored = await window.ChatGPTSaver.FileSystem.tryRestoreAccess();
-    if (restored) {
-      console.log('文件夹访问权限已恢复');
-      try {
-        const r = await chrome.storage.local.get(['savePath']);
-        UI.updateFolderStatus(r.savePath || '已授权');
-      } catch (e) { UI.updateFolderStatus('已授权'); }
+    const result = await ensureFolderReadyOrPrompt({ interactive: false, reason: 'startup', showOverlay: config.autoSave });
+    if (result.ready) await flushPendingUploads('startup_restore', { showToast: false });
+    return result.ready === true;
+  }
+
+  async function syncFolderUiFromState(folderState = null) {
+    const state = folderState || await window.ChatGPTSaver.FileSystem.getFolderState();
+    if (state?.folderAuthState === 'granted') {
+      UI.updateFolderStatus(state.folderDisplayName || '已授权');
+      UI.hideFolderRequiredOverlay();
     } else {
-      try {
-        const s = await chrome.storage.local.get(['isAuthorized']);
-        if (s.isAuthorized) await chrome.storage.local.set({ isAuthorized: false });
-      } catch (e) { /* ignore */ }
+      UI.updateFolderStatus('');
+    }
+    return state;
+  }
+
+  async function ensureFolderReadyOrPrompt(options = {}) {
+    const result = await window.ChatGPTSaver.FileSystem.ensureFolderReady({
+      interactive: options.interactive === true,
+      reason: options.reason || 'unknown'
+    });
+    const state = await syncFolderUiFromState(result.folderState || null);
+    if (!result.ready && options.showOverlay !== false) {
+      UI.showFolderRequiredOverlay();
+    } else if (result.ready) {
+      UI.hideFolderRequiredOverlay();
+    }
+    return { ...result, folderState: state };
+  }
+
+  async function flushPendingUploads(reason = 'unknown', options = {}) {
+    try {
+      const result = await window.ChatGPTSaver.ConversationAssets.flushPendingUploads({
+        reason,
+        debug: options.debug === true || config.showLogPanel === true,
+        conversation: options.conversation || null
+      });
+      if ((result?.flushedCount || 0) > 0) {
+        UI.showLog();
+        UI.addLog(`📦 已补存 ${result.flushedCount} 个暂存附件`);
+        if (options.showToast !== false) UI.showToast(`📦 已补存 ${result.flushedCount} 个暂存附件`, 'success', 3000);
+      }
+      return result;
+    } catch (error) {
+      console.log('[ChatGPT Saver] 补存暂存附件失败:', error?.message || error);
+      return { success: false, error: error?.message || 'flush_pending_uploads_failed', flushedCount: 0, pendingCount: 0 };
     }
   }
 
@@ -3646,8 +3839,40 @@
         case 'togglePanel':
           sendResponse(UI.handlePanelToggleRequest());
           break;
+        case 'getFolderState':
+          sendResponse({ success: true, folderState: await window.ChatGPTSaver.FileSystem.getFolderState() });
+          break;
+        case 'ensureFolderReady':
+        case 'repairFolderAccess':
+          {
+            const repairResult = await ensureFolderReadyOrPrompt({
+              interactive: true,
+              reason: request.action,
+              showOverlay: true
+            });
+            if (repairResult.ready) await flushPendingUploads(request.action, { showToast: false });
+            sendResponse(repairResult);
+          }
+          break;
         case 'requestFolderAccess':
-          sendResponse(await window.ChatGPTSaver.FileSystem.requestFolderAccess());
+          {
+            const response = await window.ChatGPTSaver.FileSystem.requestFolderAccess();
+            if (response?.success) {
+              await syncFolderUiFromState(response.folderState || null);
+              await flushPendingUploads('runtime_request_folder', { showToast: false });
+            }
+            sendResponse(response);
+          }
+          break;
+        case 'restoreFolderPermission':
+          {
+            const response = await window.ChatGPTSaver.FileSystem.restorePermission();
+            if (response?.success) {
+              await syncFolderUiFromState(response.folderState || null);
+              await flushPendingUploads('runtime_restore_permission', { showToast: false });
+            }
+            sendResponse(response);
+          }
           break;
         case 'exportNow':
           sendResponse(await window.ChatGPTSaver.Exporter.exportConversation(
@@ -3669,6 +3894,12 @@
             const stats = await window.ChatGPTSaver.TokenEstimator.getWorkspaceStats(wsName);
             sendResponse({ workspace: wsName, consumed: stats.consumed || 0 });
           } catch (e) { sendResponse({ workspace: '未知', consumed: 0 }); }
+          break;
+        case 'collectConversationAssets':
+          sendResponse(await window.ChatGPTSaver.ConversationAssets.collectConversationAssets());
+          break;
+        case 'collectHistoricalGeneratedFiles':
+          sendResponse(await window.ChatGPTSaver.ConversationAssets.collectGeneratedFiles());
           break;
         default:
           sendResponse({ error: '未知操作' });
@@ -3694,27 +3925,34 @@
     document.body.appendChild(overlay);
   }
 
-  function startAutoSave() {
+  async function startAutoSave() {
     const unavailableMessage = AccessManager.getUnavailableMessage();
     if (!AccessManager.canUseNow()) {
       UI.showCardKeyOverlay(unavailableMessage);
       UI.updateStatus();
       return;
     }
+    const folderReady = await ensureFolderReadyOrPrompt({ interactive: false, reason: 'autosave_start', showOverlay: config.autoSave });
+    if (!folderReady.ready) {
+      window.ChatGPTSaver.Observer.stop();
+      UI.updateStatus();
+      return;
+    }
+    await flushPendingUploads('autosave_start', { showToast: false });
     window.ChatGPTSaver.Observer.start(async () => {
       if (!AccessManager.canUseNow()) return;
       if (saveDebounceTimer) clearTimeout(saveDebounceTimer);
-      if (window.ChatGPTSaver.FileSystem.isAuthorized()) {
-        UI.showLog();
-        UI.addLog('⏳ 检测到对话变化，等待稳定后保存...');
-      }
+      UI.showLog();
+      UI.addLog('⏳ 检测到对话变化，等待稳定后保存...');
       saveDebounceTimer = setTimeout(async () => {
         if (!AccessManager.canUseNow()) {
           UI.showCardKeyOverlay(AccessManager.getUnavailableMessage());
           UI.updateStatus();
           return;
         }
-        if (!window.ChatGPTSaver.FileSystem.isAuthorized() || !window.ChatGPTSaver.Exporter.canExport()) {
+        const saveFolderReady = await ensureFolderReadyOrPrompt({ interactive: false, reason: 'autosave_tick', showOverlay: true });
+        if (!saveFolderReady.ready || !window.ChatGPTSaver.Exporter.canExport()) {
+          window.ChatGPTSaver.Observer.stop();
           UI.clearLog();
           return;
         }
@@ -3746,7 +3984,9 @@
     if (window.ChatGPTSaver.FileSystem.isAuthorized()) { UI.clearLog(); UI.showLog(); UI.addLog('🔄 切换对话，等待页面加载...'); }
     setTimeout(async () => {
       await waitForConversationReady();
-      if (window.ChatGPTSaver.FileSystem.isAuthorized()) UI.addLog('✅ 页面加载完成');
+      const folderReady = await ensureFolderReadyOrPrompt({ interactive: false, reason: 'url_change', showOverlay: config.autoSave });
+      if (folderReady.ready) UI.addLog('✅ 页面加载完成');
+      if (folderReady.ready) await flushPendingUploads('url_change', { showToast: false });
       if (config.autoSave) startAutoSave();
       UI.updateUsage();
       ChatNavigator.onConversationChanged();
@@ -3776,14 +4016,13 @@
       counts[wsName] = (counts[wsName] || 0) + 1;
       await chrome.storage.local.set({ wsSavedCounts: counts });
       UI.updateUsage();
-      // 自动导出上下文
-      autoExportContext();
     } catch (e) { /* ignore */ }
   }
 
   async function autoExportContext() {
     const fs = window.ChatGPTSaver?.FileSystem;
-    if (!fs || !fs.isAuthorized()) return;
+    const ready = await ensureFolderReadyOrPrompt({ interactive: false, reason: 'auto_context', showOverlay: false });
+    if (!fs || !ready.ready) return;
     try {
       const parser = window.ChatGPTSaver.Parser;
       const conversation = parser.parseConversation();
@@ -3791,30 +4030,10 @@
       const wsName = parser.getWorkspaceName() || '个人帐户';
       const title = parser.getConversationTitle();
       if (!title) return;
-      const sanitize = (n) => n.replace(/[/\\:*?"<>|]/g, '-').replace(/\s+/g, ' ').trim().substring(0, 100);
-      const safeWs = sanitize(wsName);
-      const safeTitle = sanitize(title);
-      const rootHandle = await fs.getBackupRootHandle();
-      if (!rootHandle) return;
-      const wsFolder = await rootHandle.getDirectoryHandle(safeWs, { create: true });
-      const convFolder = await wsFolder.getDirectoryHandle(safeTitle, { create: true });
-      const ctxFolder = await convFolder.getDirectoryHandle('context', { create: true });
-      // 生成上下文 JSON
-      const messages = conversation.messages.map((msg, i) => ({ index: i + 1, role: msg.role, content: msg.textContent || '' }));
-      const contextData = {
-        version: '2.0', type: 'single', title, url: location.href,
-        exportedAt: new Date().toISOString(), messageCount: messages.length,
-        workspace: wsName, messages
-      };
-      const jsonStr = JSON.stringify(contextData, null, 2);
-      const filename = `${safeTitle}.json`;
-      const fileHandle = await ctxFolder.getFileHandle(filename, { create: true });
-      const writable = await fileHandle.createWritable();
-      await writable.write(new Blob([jsonStr], { type: 'application/json' }));
-      await writable.close();
-      console.log('[ChatGPT Saver] 上下文已自动保存:', filename);
-      // 检测并保存附件
-      await AttachmentManager.detectAndSaveAttachments(safeWs, safeTitle);
+      const assetResult = await window.ChatGPTSaver.ConversationAssets.collectConversationAssets({ conversation });
+      if (assetResult?.contextData) {
+        console.log('[ChatGPT Saver] 上下文与资产索引已更新:', title);
+      }
       // 索引到搜索数据库
       try {
         const si = window.ChatGPTSaver?.SearchIndex;

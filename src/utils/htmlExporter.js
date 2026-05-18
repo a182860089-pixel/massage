@@ -35,6 +35,8 @@ const HTMLExporter = {
     const sourceUrl = this.escapeHtml(rawSourceUrl);
     const workspaceTag = source.isWorkspace ? '<span class="chat-meta-item workspace">Workspace</span>' : '';
 
+    const messageCount = messages.length;
+
     const turnsHtml = messages.map((msg, index) => {
       const normalizedRole = this.normalizeRole(msg?.role);
       const bodyHtml = this.sanitizeMessageHtml(msg?.content || '');
@@ -448,13 +450,13 @@ const HTMLExporter = {
   </style>
 </head>
 <body>
-  <main class="chat-shell" id="chat-export-root">
+    <main class="chat-shell" id="chat-export-root" data-msg-count="${messageCount}">
     <header class="chat-toolbar">
       <div class="toolbar-main">
         <h1 class="chat-title">${safeTitle}</h1>
       <div class="chat-meta">
         <span class="chat-meta-item">导出时间: ${exportTime}</span>
-        <span class="chat-meta-item">消息数: ${messages.length}</span>
+        <span class="chat-meta-item">消息数: ${messageCount}</span>
         ${workspaceTag}
       </div>
       </div>
@@ -750,6 +752,20 @@ ${this.buildRuntimeScript()}
 
   ensureSafeLinks(root) {
     root.querySelectorAll('a').forEach((anchor) => {
+      const rawHref = String(anchor.getAttribute('href') || '').trim();
+      let safeHref = '';
+      if (rawHref) {
+        try {
+          const parsed = new URL(rawHref, 'https://chatgpt.com');
+          if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+            safeHref = parsed.href;
+          }
+        } catch {
+          safeHref = '';
+        }
+      }
+      if (safeHref) anchor.setAttribute('href', safeHref);
+      else anchor.removeAttribute('href');
       anchor.setAttribute('target', '_blank');
       anchor.setAttribute('rel', 'noopener noreferrer');
     });

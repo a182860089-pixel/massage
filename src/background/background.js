@@ -6,7 +6,6 @@ import '../utils/clientConfigCache.js';
 
 const CLIENT_CONFIG_URL = 'https://seat.20050225.xyz/api/plugin/card-keys/client-config';
 const BASE_API_URL = 'https://seat.20050225.xyz';
-const DEBUGGER_PROTOCOL_VERSION = '1.3';
 const CLIENT_CONFIG_REFRESH_PERIOD_MS = 6 * 60 * 60 * 1000;
 const CLIENT_CONFIG_REFRESH_PERIOD_MINUTES = CLIENT_CONFIG_REFRESH_PERIOD_MS / (60 * 1000);
 const CLIENT_CONFIG_REFRESH_ALARM = 'chatgptSaverClientConfigAutoRefreshV1';
@@ -60,10 +59,19 @@ chrome.runtime.onInstalled.addListener((details) => {
     
     // 初始化默认设置
     chrome.storage.local.set({
+      folderAuthState: 'missing',
+      folderDisplayName: '',
+      folderChosenAt: '',
+      folderLastVerifiedAt: '',
+      folderLastFailureReason: '',
+      folderVersion: 2,
+      guideBannerDismissed: false,
+      guideLastViewedAt: '',
+      guideVersion: 1,
       isAuthorized: false,
       savePath: '',
       savedCount: 0,
-      exportFormats: { html: true, md: true, pdf: true },
+      exportFormats: { html: true, md: true, pdf: true, json: true },
       autoSave: true
     });
   } else if (details.reason === 'update') {
@@ -119,6 +127,12 @@ async function handleMessage(request, sender, sendResponse) {
         
       case 'getSettings':
         const settings = await chrome.storage.local.get([
+          'folderAuthState',
+          'folderDisplayName',
+          'folderChosenAt',
+          'folderLastVerifiedAt',
+          'folderLastFailureReason',
+          'folderVersion',
           'isAuthorized', 
           'savePath', 
           'savedCount', 
@@ -140,6 +154,11 @@ async function handleMessage(request, sender, sendResponse) {
         sendResponse({ success: true, count: newCount });
         break;
 
+      case 'openGuidePage':
+        await chrome.tabs.create({ url: chrome.runtime.getURL('src/help/guide.html') });
+        sendResponse({ success: true });
+        break;
+
       case 'pluginActivateCardKey':
         await handlePluginCardKeyRequest('/api/plugin/card-keys/activate', request, sendResponse);
         break;
@@ -155,11 +174,6 @@ async function handleMessage(request, sender, sendResponse) {
       case 'pluginGetClientConfig':
         await handlePluginGetClientConfig(request, sendResponse);
         break;
-
-      case 'printToPdfFromHtml':
-        await handlePrintToPdfFromHtml(request, sender, sendResponse);
-        break;
-        
       default:
         sendResponse({ error: '未知操作' });
     }
@@ -189,6 +203,10 @@ async function handleDownload(request, sendResponse) {
 
 /**
  * 插件卡密接口转发
+ *
+ * 关键约定：网络错误（fetch 抛出、HTTP 非 2xx）只标 network_error: true，
+ * 不告诉前端 authorized:false。前端 CardKeyManager 看到 network_error
+ * 一律跳过 clearOnInvalid，保留本地卡密缓存，避免抖动时把用户踢回免费版。
  */
 async function handlePluginCardKeyRequest(path, request, sendResponse) {
   try {
@@ -201,171 +219,35 @@ async function handlePluginCardKeyRequest(path, request, sendResponse) {
         client_id: request.client_id
       })
     });
-    const json = await resp.json();
+    if (!resp.ok) {
+      sendResponse({
+        success: false,
+        network_error: true,
+        message: `网络错误: HTTP ${resp.status}`,
+        data: { authorized: false }
+      });
+      return;
+    }
+    let json;
+    try {
+      json = await resp.json();
+    } catch (parseError) {
+      sendResponse({
+        success: false,
+        network_error: true,
+        message: '网络错误: 响应不是合法 JSON',
+        data: { authorized: false }
+      });
+      return;
+    }
     sendResponse(json);
   } catch (e) {
     sendResponse({
       success: false,
+      network_error: true,
       message: '网络错误: ' + e.message,
       data: { authorized: false }
     });
-  }
-}
-
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
-}
-
-async function waitForTabComplete(tabId, timeoutMs = 8000) {
-  const current = await chrome.tabs.get(tabId);
-  if (current?.status === 'complete') return;
-
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      cleanup();
-      reject(new Error('等待临时标签页加载超时'));
-    }, timeoutMs);
-
-    const onUpdated = (updatedTabId, changeInfo) => {
-      if (updatedTabId !== tabId) return;
-      if (changeInfo.status === 'complete') {
-        cleanup();
-        resolve();
-      }
-    };
-
-    function cleanup() {
-      clearTimeout(timer);
-      chrome.tabs.onUpdated.removeListener(onUpdated);
-    }
-
-    chrome.tabs.onUpdated.addListener(onUpdated);
-  });
-}
-
-async function waitForPrintReady(debuggee, timeoutMs = 8000) {
-  const startedAt = Date.now();
-  while ((Date.now() - startedAt) < timeoutMs) {
-    try {
-      const stateResult = await chrome.debugger.sendCommand(debuggee, 'Runtime.evaluate', {
-        expression: '(() => { const imgs = Array.from(document.images || []); const imgReady = imgs.every(img => img.complete); const fontsReady = !document.fonts || document.fonts.status === "loaded"; return { readyState: document.readyState, imgReady, fontsReady }; })()',
-        returnByValue: true
-      });
-
-      const payload = stateResult?.result?.value || {};
-      if (payload.readyState === 'complete' && payload.imgReady && payload.fontsReady) {
-        return;
-      }
-    } catch (e) {
-      // ignore and retry
-    }
-    await delay(120);
-  }
-}
-
-function normalizePrintOptions(input) {
-  const opts = input && typeof input === 'object' ? input : {};
-  const toNumber = (value, fallback) => {
-    const n = Number(value);
-    return Number.isFinite(n) && n > 0 ? n : fallback;
-  };
-
-  return {
-    printBackground: opts.printBackground !== false,
-    preferCSSPageSize: opts.preferCSSPageSize !== false,
-    landscape: opts.landscape === true,
-    scale: Math.max(0.1, Math.min(2, toNumber(opts.scale, 1))),
-    paperWidth: toNumber(opts.paperWidth, 8.27),
-    paperHeight: toNumber(opts.paperHeight, 11.69),
-    marginTop: Math.max(0, toNumber(opts.marginTop, 0.4)),
-    marginBottom: Math.max(0, toNumber(opts.marginBottom, 0.4)),
-    marginLeft: Math.max(0, toNumber(opts.marginLeft, 0.35)),
-    marginRight: Math.max(0, toNumber(opts.marginRight, 0.35))
-  };
-}
-
-async function handlePrintToPdfFromHtml(request, sender, sendResponse) {
-  const html = String(request?.html || '');
-  if (!html.trim()) {
-    sendResponse({ success: false, error: 'HTML 内容为空' });
-    return;
-  }
-  if (html.length > 12_000_000) {
-    sendResponse({ success: false, error: 'HTML 内容过大，请缩短对话后重试' });
-    return;
-  }
-
-  let tabId = null;
-  let attached = false;
-  const debuggee = { tabId: -1 };
-
-  try {
-    const createdTab = await chrome.tabs.create({
-      url: 'about:blank',
-      active: false
-    });
-
-    tabId = createdTab?.id;
-    if (!tabId) throw new Error('创建临时打印标签页失败');
-    debuggee.tabId = tabId;
-
-    await waitForTabComplete(tabId, 8000);
-    await chrome.debugger.attach(debuggee, DEBUGGER_PROTOCOL_VERSION);
-    attached = true;
-
-    await chrome.debugger.sendCommand(debuggee, 'Page.enable');
-    await chrome.debugger.sendCommand(debuggee, 'Runtime.enable');
-
-    const frameTree = await chrome.debugger.sendCommand(debuggee, 'Page.getFrameTree');
-    const frameId = frameTree?.frameTree?.frame?.id;
-    if (!frameId) throw new Error('获取打印页面 frame 失败');
-
-    await chrome.debugger.sendCommand(debuggee, 'Page.setDocumentContent', {
-      frameId,
-      html
-    });
-    await delay(120);
-    await waitForPrintReady(debuggee, 8000);
-    await chrome.debugger.sendCommand(debuggee, 'Emulation.setEmulatedMedia', {
-      media: 'print'
-    });
-
-    const pdfResult = await chrome.debugger.sendCommand(
-      debuggee,
-      'Page.printToPDF',
-      normalizePrintOptions(request?.options)
-    );
-
-    if (!pdfResult?.data) {
-      throw new Error('printToPDF 未返回数据');
-    }
-
-    sendResponse({
-      success: true,
-      data: pdfResult.data,
-      mimeType: 'application/pdf'
-    });
-  } catch (error) {
-    console.error('HTML 原样 PDF 导出失败:', error);
-    sendResponse({
-      success: false,
-      error: error?.message || 'HTML 原样 PDF 导出失败'
-    });
-  } finally {
-    if (attached) {
-      try {
-        await chrome.debugger.detach(debuggee);
-      } catch (e) {
-        // ignore detach failures
-      }
-    }
-    if (tabId) {
-      try {
-        await chrome.tabs.remove(tabId);
-      } catch (e) {
-        // ignore remove failures
-      }
-    }
   }
 }
 

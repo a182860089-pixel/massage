@@ -1,0 +1,42 @@
+{
+    "manifest_version": 3,
+    "name": "ChatGPT Saver & Usage Monitor",
+    "version": "3.1",
+    "description": "Auto save ChatGPT conversations and monitor model usage.",
+    "permissions": [
+        "storage",
+        "downloads"
+    ],
+    "host_permissions": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*",
+        "https://seat.20050225.xyz/*"
+    ],
+    "background": {
+        "service_worker": "background.js"
+    },
+    "content_scripts": [
+        {
+            "matches": [
+                "https://chatgpt.com/*",
+                "https://chat.openai.com/*"
+            ],
+            "js": [
+                "content/loader.js"
+            ],
+            "run_at": "document_start",
+            "world": "ISOLATED"
+        }
+    ],
+    "web_accessible_resources": [
+        {
+            "resources": [
+                "content/core.js"
+            ],
+            "matches": [
+                "https://chatgpt.com/*",
+                "https://chat.openai.com/*"
+            ]
+        }
+    ]
+}

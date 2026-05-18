@@ -5,6 +5,8 @@
 const ConversationObserver = {
   observer: null,
   debounceTimer: null,
+  containerCheckTimer: null,
+  containerCheckExpireTimer: null,
   previousHash: null,
   isWatching: false,
   debounceDelay: 3000, // 防抖延迟 3 秒，确保回复完成
@@ -41,16 +43,37 @@ const ConversationObserver = {
    * 等待容器加载
    */
   waitForContainer() {
-    const checkInterval = setInterval(() => {
+    // 先清掉可能残留的旧 polling，保证幂等
+    if (this.containerCheckTimer) {
+      clearInterval(this.containerCheckTimer);
+      this.containerCheckTimer = null;
+    }
+    if (this.containerCheckExpireTimer) {
+      clearTimeout(this.containerCheckExpireTimer);
+      this.containerCheckExpireTimer = null;
+    }
+
+    this.containerCheckTimer = setInterval(() => {
       const container = window.ChatGPTSaver.Parser.getConversationContainer();
       if (container) {
-        clearInterval(checkInterval);
+        clearInterval(this.containerCheckTimer);
+        this.containerCheckTimer = null;
+        if (this.containerCheckExpireTimer) {
+          clearTimeout(this.containerCheckExpireTimer);
+          this.containerCheckExpireTimer = null;
+        }
         this.setupObserver(container);
       }
     }, 500);
-    
+
     // 30 秒后停止检查
-    setTimeout(() => clearInterval(checkInterval), 30000);
+    this.containerCheckExpireTimer = setTimeout(() => {
+      if (this.containerCheckTimer) {
+        clearInterval(this.containerCheckTimer);
+        this.containerCheckTimer = null;
+      }
+      this.containerCheckExpireTimer = null;
+    }, 30000);
   },
   
   /**
@@ -208,6 +231,16 @@ const ConversationObserver = {
       clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
     }
+
+    // 确保 waitForContainer 的 polling/expiry 不会在 stop 之后再触发 setupObserver
+    if (this.containerCheckTimer) {
+      clearInterval(this.containerCheckTimer);
+      this.containerCheckTimer = null;
+    }
+    if (this.containerCheckExpireTimer) {
+      clearTimeout(this.containerCheckExpireTimer);
+      this.containerCheckExpireTimer = null;
+    }
     
     this.isWatching = false;
     this.previousHash = null;
@@ -239,35 +272,61 @@ const ConversationObserver = {
 const URLObserver = {
   lastURL: null,
   onChangeCallback: null,
-  
+  _started: false,
+  _popstateListener: null,
+  _mutationObserver: null,
+  _pollTimer: null,
+
   /**
    * 开始监听 URL 变化
+   *
+   * 幂等：第二次调用时会先 stop 掉之前注册的所有副作用，
+   * 避免在 SPA 重入场景下叠加 popstate listener / MutationObserver / setInterval。
    */
   start(onChange) {
+    if (this._started) {
+      this.stop();
+    }
     this.lastURL = window.location.href;
     this.onChangeCallback = onChange;
-    
-    // 使用 popstate 事件
-    window.addEventListener('popstate', () => this.checkURLChange());
-    
-    // 使用 MutationObserver 监听 URL 变化（SPA 路由）
-    const observer = new MutationObserver(() => {
-      this.checkURLChange();
-    });
-    
-    observer.observe(document.body, {
+
+    this._popstateListener = () => this.checkURLChange();
+    window.addEventListener('popstate', this._popstateListener);
+
+    this._mutationObserver = new MutationObserver(() => this.checkURLChange());
+    this._mutationObserver.observe(document.body, {
       childList: true,
       subtree: true
     });
-    
-    // 定期检查（作为备用方案）
-    setInterval(() => this.checkURLChange(), 1000);
+
+    this._pollTimer = setInterval(() => this.checkURLChange(), 1000);
+    this._started = true;
   },
-  
+
+  /**
+   * 停止监听并释放所有资源
+   */
+  stop() {
+    if (this._popstateListener) {
+      try { window.removeEventListener('popstate', this._popstateListener); } catch {}
+      this._popstateListener = null;
+    }
+    if (this._mutationObserver) {
+      try { this._mutationObserver.disconnect(); } catch {}
+      this._mutationObserver = null;
+    }
+    if (this._pollTimer) {
+      clearInterval(this._pollTimer);
+      this._pollTimer = null;
+    }
+    this._started = false;
+  },
+
   /**
    * 检查 URL 是否变化
    */
   checkURLChange() {
+    if (typeof window === 'undefined' || !window.location) return;
     const currentURL = window.location.href;
     if (currentURL !== this.lastURL) {
       this.lastURL = currentURL;

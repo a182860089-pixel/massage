@@ -1,209 +1,245 @@
 /**
- * Markdown 导出器 - 使用 Turndown.js 将 HTML 转换为 Markdown
+ * Markdown exporter based on Turndown + @joplin/turndown-plugin-gfm.
  */
+
+function resolveTurndownServiceCtor() {
+  if (typeof TurndownService !== 'undefined') return TurndownService;
+  if (typeof window !== 'undefined' && typeof window.TurndownService !== 'undefined') {
+    return window.TurndownService;
+  }
+  return null;
+}
+
+function resolveGfmPluginModule() {
+  if (typeof TurndownPluginGfm !== 'undefined') return TurndownPluginGfm;
+  if (typeof window !== 'undefined' && window.TurndownPluginGfm) return window.TurndownPluginGfm;
+
+  if (typeof module !== 'undefined' && typeof module.require === 'function') {
+    try {
+      return module.require('@joplin/turndown-plugin-gfm');
+    } catch (error) {
+      return null;
+    }
+  }
+
+  if (typeof require === 'function') {
+    try {
+      return require('@joplin/turndown-plugin-gfm');
+    } catch (error) {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+function sanitizeImageAltText(alt) {
+  return String(alt || '图片')
+    .replace(/\r?\n/g, ' ')
+    .replace(/\[/g, '\\[')
+    .replace(/\]/g, '\\]');
+}
+
+function normalizeMarkdownOutput(markdownText) {
+  return String(markdownText || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function createMarkdownTurndownService(options = {}) {
+  const TurndownCtor = options.TurndownServiceCtor || resolveTurndownServiceCtor();
+  if (!TurndownCtor) return null;
+
+  const service = new TurndownCtor({
+    headingStyle: 'atx',
+    codeBlockStyle: 'fenced',
+    bulletListMarker: '-',
+    emDelimiter: '*'
+  });
+
+  const gfmModule = options.gfmModule || resolveGfmPluginModule();
+  const gfmPlugin = gfmModule?.gfm || gfmModule?.default?.gfm || null;
+  if (typeof gfmPlugin === 'function') {
+    service.use(gfmPlugin);
+  }
+
+  service.addRule('codeBlock', {
+    filter(node) {
+      return node.nodeName === 'PRE' && !!node.querySelector('code');
+    },
+    replacement(content, node) {
+      const codeEl = node.querySelector('code');
+      const code = codeEl?.textContent || node.textContent || '';
+      let language = '';
+
+      if (codeEl && codeEl.classList?.length) {
+        const langClass = Array.from(codeEl.classList).find(c => c.startsWith('language-'));
+        if (langClass) language = langClass.replace('language-', '');
+      }
+      if (!language && node.hasAttribute('data-language')) {
+        language = String(node.getAttribute('data-language') || '').trim();
+      }
+
+      return `\n\n\`\`\`${language}\n${code}\n\`\`\`\n\n`;
+    }
+  });
+
+  service.addRule('inlineCode', {
+    filter(node) {
+      return node.nodeName === 'CODE' && node.parentNode?.nodeName !== 'PRE';
+    },
+    replacement(content, node) {
+      return '`' + String(node.textContent || '') + '`';
+    }
+  });
+
+  service.addRule('image', {
+    filter: 'img',
+    replacement(content, node) {
+      const alt = sanitizeImageAltText(node.getAttribute('alt'));
+      const src = String(node.getAttribute('src') || '').trim();
+      return `![${alt}](${src})`;
+    }
+  });
+
+  service.addRule('removeButtons', {
+    filter(node) {
+      return node.nodeName === 'BUTTON' ||
+        (node.classList && (
+          node.classList.contains('copy-button') ||
+          node.classList.contains('absolute')
+        ));
+    },
+    replacement() {
+      return '';
+    }
+  });
+
+  return service;
+}
 
 const MarkdownExporter = {
   turndownService: null,
-  
-  /**
-   * 初始化 Turndown 服务
-   */
+
   init() {
-    if (this.turndownService) {
-      return;
-    }
-    
-    // 检查 Turndown 是否已加载
-    if (typeof TurndownService === 'undefined') {
+    if (this.turndownService) return;
+    this.turndownService = createMarkdownTurndownService();
+    if (!this.turndownService) {
       console.error('Turndown.js 未加载');
-      return;
     }
-    
-    this.turndownService = new TurndownService({
-      headingStyle: 'atx',
-      codeBlockStyle: 'fenced',
-      bulletListMarker: '-',
-      emDelimiter: '*'
-    });
-    
-    // 添加自定义规则
-    this.addCustomRules();
   },
-  
-  /**
-   * 添加自定义转换规则
-   */
-  addCustomRules() {
-    // 代码块处理
-    this.turndownService.addRule('codeBlock', {
-      filter: function(node) {
-        return node.nodeName === 'PRE' && node.querySelector('code');
-      },
-      replacement: function(content, node) {
-        const codeEl = node.querySelector('code');
-        const code = codeEl.textContent;
-        
-        // 获取语言
-        let language = '';
-        const langClass = Array.from(codeEl.classList).find(c => c.startsWith('language-'));
-        if (langClass) {
-          language = langClass.replace('language-', '');
-        } else if (node.hasAttribute('data-language')) {
-          language = node.getAttribute('data-language');
-        }
-        
-        return '\n\n```' + language + '\n' + code + '\n```\n\n';
-      }
-    });
-    
-    // 行内代码处理
-    this.turndownService.addRule('inlineCode', {
-      filter: function(node) {
-        return node.nodeName === 'CODE' && 
-               node.parentNode.nodeName !== 'PRE';
-      },
-      replacement: function(content, node) {
-        return '`' + node.textContent + '`';
-      }
-    });
-    
-    // 图片处理
-    this.turndownService.addRule('image', {
-      filter: 'img',
-      replacement: function(content, node) {
-        const alt = node.getAttribute('alt') || '图片';
-        const src = node.getAttribute('src') || '';
-        return `![${alt}](${src})`;
-      }
-    });
-    
-    // 删除不需要的元素
-    this.turndownService.addRule('removeButtons', {
-      filter: function(node) {
-        return node.nodeName === 'BUTTON' || 
-               (node.classList && (
-                 node.classList.contains('copy-button') ||
-                 node.classList.contains('absolute')
-               ));
-      },
-      replacement: function() {
-        return '';
-      }
-    });
-  },
-  
-  /**
-   * 导出对话为 Markdown
-   */
+
   export() {
     this.init();
-    
     const conversation = window.ChatGPTSaver.Parser.parseConversation();
-    
-    if (!conversation.messages.length) {
-      return null;
-    }
-    
+    return this.exportConversation(conversation);
+  },
+
+  exportFromMessages(messages, title = '') {
+    this.init();
+    const parser = window.ChatGPTSaver?.Parser;
+    const safeMessages = Array.isArray(messages) ? messages : [];
+    const conversation = {
+      title: String(title || parser?.getConversationTitle?.() || '对话节选').trim(),
+      isWorkspace: !!parser?.isWorkspacePage?.(),
+      url: typeof window !== 'undefined' ? window.location.href : '',
+      messages: safeMessages
+    };
+    return this.exportConversation(conversation);
+  },
+
+  exportConversation(conversation) {
+    const source = conversation && typeof conversation === 'object' ? conversation : {};
+    const messages = Array.isArray(source.messages) ? source.messages : [];
+    if (!messages.length) return null;
+
+    const title = String(source.title || 'ChatGPT 对话').trim() || 'ChatGPT 对话';
+    const url = String(source.url || (typeof window !== 'undefined' ? window.location.href : '') || '');
+    const isWorkspace = source.isWorkspace === true;
+
     let markdown = '';
-    
-    // 添加标题
-    markdown += `# ${conversation.title}\n\n`;
-    
-    // 添加元信息
-    markdown += `> 📅 导出时间: ${new Date().toLocaleString('zh-CN')}  \n`;
-    markdown += `> 💬 共 ${conversation.messages.length} 条消息  \n`;
-    if (conversation.isWorkspace) {
-      markdown += `> 🏢 工作区对话  \n`;
-    }
-    markdown += `> 🔗 来源: ${conversation.url}\n\n`;
-    markdown += `---\n\n`;
-    
-    // 转换每条消息
-    conversation.messages.forEach((msg, index) => {
-      const roleLabel = msg.role === 'user' ? '## 👤 用户' : '## 🤖 ChatGPT';
+    markdown += `# ${title}\n\n`;
+    markdown += `> 导出时间: ${new Date().toLocaleString('zh-CN')}  \n`;
+    markdown += `> 消息数量: ${messages.length}  \n`;
+    if (isWorkspace) markdown += '> 对话类型: 工作区  \n';
+    if (url) markdown += `> 来源: ${url}\n\n`;
+    markdown += '---\n\n';
+
+    messages.forEach((msg, index) => {
+      const role = String(msg?.role || '').toLowerCase();
+      const roleLabel = role === 'user'
+        ? '## 👤 用户'
+        : (role === 'assistant' ? '## 🤖 ChatGPT' : '## ⚙️ 系统');
       markdown += `${roleLabel}\n\n`;
-      
-      // 将 HTML 内容转换为 Markdown
-      const msgContent = this.htmlToMarkdown(msg.content);
-      markdown += msgContent;
+
+      const rawHtml = String(msg?.content || msg?.textContent || '').trim();
+      markdown += this.htmlToMarkdown(rawHtml);
       markdown += '\n\n';
-      
-      // 添加分隔线（除了最后一条消息）
-      if (index < conversation.messages.length - 1) {
-        markdown += `---\n\n`;
+
+      if (index < messages.length - 1) {
+        markdown += '---\n\n';
       }
     });
-    
-    // 添加页脚
-    markdown += `\n---\n\n`;
-    markdown += `*由 ChatGPT 对话保存助手导出*\n`;
-    
-    return markdown;
+
+    markdown += '*由 ChatGPT 对话保存助手导出*\n';
+    return normalizeMarkdownOutput(markdown);
   },
-  
-  /**
-   * HTML 转 Markdown
-   */
+
   htmlToMarkdown(html) {
+    if (!this.turndownService) this.init();
+
     if (!this.turndownService) {
-      this.init();
+      const fallbackDiv = document.createElement('div');
+      fallbackDiv.innerHTML = html;
+      return normalizeMarkdownOutput(fallbackDiv.textContent || fallbackDiv.innerText || '');
     }
-    
-    if (!this.turndownService) {
-      // 降级方案：简单的文本提取
-      const div = document.createElement('div');
-      div.innerHTML = html;
-      return div.textContent || div.innerText;
-    }
-    
+
     try {
-      // 创建临时 DOM 元素
       const tempDiv = document.createElement('div');
       tempDiv.innerHTML = html;
-      
-      // 清理不需要的元素
-      tempDiv.querySelectorAll('button, [class*="copy"]').forEach(el => el.remove());
-      
-      // 转换为 Markdown
-      let markdown = this.turndownService.turndown(tempDiv);
-      
-      // 清理多余的空行
-      markdown = markdown.replace(/\n{3,}/g, '\n\n');
-      
-      return markdown.trim();
+      tempDiv.querySelectorAll('button, [class*="copy"]').forEach((el) => el.remove());
+
+      const markdown = this.turndownService.turndown(tempDiv);
+      return normalizeMarkdownOutput(markdown);
     } catch (error) {
       console.error('Markdown 转换失败:', error);
-      // 降级方案
-      const div = document.createElement('div');
-      div.innerHTML = html;
-      return div.textContent || div.innerText;
+      const fallbackDiv = document.createElement('div');
+      fallbackDiv.innerHTML = html;
+      return normalizeMarkdownOutput(fallbackDiv.textContent || fallbackDiv.innerText || '');
     }
   },
-  
-  /**
-   * 简单文本导出（无 Turndown 时的降级方案）
-   */
+
   exportSimple() {
     const conversation = window.ChatGPTSaver.Parser.parseConversation();
-    
-    if (!conversation.messages.length) {
-      return null;
-    }
-    
+    const messages = Array.isArray(conversation?.messages) ? conversation.messages : [];
+    if (!messages.length) return null;
+
     let text = '';
     text += `# ${conversation.title}\n\n`;
     text += `导出时间: ${new Date().toLocaleString('zh-CN')}\n`;
-    text += `---\n\n`;
-    
-    conversation.messages.forEach(msg => {
+    text += '---\n\n';
+
+    messages.forEach((msg, index) => {
       const roleLabel = msg.role === 'user' ? '## 用户' : '## ChatGPT';
-      text += `${roleLabel}\n\n${msg.textContent}\n\n---\n\n`;
+      text += `${roleLabel}\n\n${msg.textContent || ''}\n\n`;
+      if (index < messages.length - 1) text += '---\n\n';
     });
-    
-    return text;
+
+    return normalizeMarkdownOutput(text);
   }
 };
 
-// 导出
-window.ChatGPTSaver = window.ChatGPTSaver || {};
-window.ChatGPTSaver.MarkdownExporter = MarkdownExporter;
+if (typeof window !== 'undefined') {
+  window.ChatGPTSaver = window.ChatGPTSaver || {};
+  window.ChatGPTSaver.MarkdownExporter = MarkdownExporter;
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    MarkdownExporter,
+    createMarkdownTurndownService,
+    normalizeMarkdownOutput
+  };
+}
+

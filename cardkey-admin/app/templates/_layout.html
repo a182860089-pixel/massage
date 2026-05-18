@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}激活码管理系统{% endblock %}</title>
+    <style>
+        :root {
+            --color-bg: #ffffff;
+            --color-surface: #ffffff;
+            --color-surface-soft: #f7f7f8;
+            --color-surface-hover: #ececf1;
+            --color-border: #e5e5e5;
+            --color-border-strong: #d9d9e3;
+            --color-text: #0d0d0d;
+            --color-text-soft: #6e6e80;
+            --color-text-muted: #8e8ea0;
+            /* 单色系：所有"主操作 / 成功 / 信息"全部用同一支黑色 */
+            --color-primary: #0d0d0d;
+            --color-primary-hover: #1f1f1f;
+            --color-primary-soft: #f0f0f1;
+            /* 危险 / 警告：保留语义色，但克制饱和度 */
+            --color-danger: #d83838;
+            --color-danger-soft: #fde8e8;
+            --color-warning: #d97706;
+            --color-warning-soft: #fef3c7;
+            /* 兼容旧 token：success / info 全部映射到中性灰，绿/蓝彻底退场 */
+            --color-success: #0d0d0d;
+            --color-success-soft: #f0f0f1;
+            --color-info: #4a4a55;
+            --color-info-soft: #f0f0f1;
+            --shadow-sm: 0 1px 2px rgba(0,0,0,0.04);
+            --shadow-md: 0 4px 12px rgba(0,0,0,0.06);
+            --shadow-lg: 0 12px 32px rgba(0,0,0,0.10);
+            --radius-sm: 6px;
+            --radius-md: 8px;
+            --radius-lg: 12px;
+            --radius-xl: 16px;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        html, body {
+            font-family: "Söhne", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
+                         "Helvetica Neue", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+            background: var(--color-bg);
+            color: var(--color-text);
+            line-height: 1.55;
+            min-height: 100vh;
+            font-size: 14px;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+
+        a { color: var(--color-text); text-decoration: none; }
+        a:hover { color: var(--color-primary); }
+
+        button { font-family: inherit; }
+
+        /* ---------- container / cards ---------- */
+        .container { max-width: 1280px; margin: 0 auto; padding: 24px; }
+
+        .card {
+            background: var(--color-surface);
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius-lg);
+            padding: 24px;
+            margin-bottom: 16px;
+        }
+
+        /* ---------- buttons ---------- */
+        .btn {
+            display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+            padding: 9px 16px;
+            border-radius: var(--radius-md);
+            border: 1px solid transparent;
+            background: transparent;
+            color: var(--color-text);
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.05s;
+            text-decoration: none;
+            white-space: nowrap;
+            line-height: 1.2;
+        }
+        .btn:hover { text-decoration: none; }
+        .btn:active { transform: translateY(0.5px); }
+        .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
+        .btn-primary { background: var(--color-text); color: #fff; border-color: var(--color-text); }
+        .btn-primary:hover { background: var(--color-primary-hover); color: #fff; border-color: var(--color-primary-hover); }
+
+        /* accent 历史上是绿色 CTA，现在与 primary 统一为黑色（不再保留绿色） */
+        .btn-accent { background: var(--color-text); color: #fff; border-color: var(--color-text); }
+        .btn-accent:hover { background: var(--color-primary-hover); color: #fff; border-color: var(--color-primary-hover); }
+
+        .btn-secondary { background: var(--color-surface); color: var(--color-text); border-color: var(--color-border-strong); }
+        .btn-secondary:hover { background: var(--color-surface-soft); }
+
+        .btn-ghost { background: transparent; color: var(--color-text-soft); }
+        .btn-ghost:hover { background: var(--color-surface-soft); color: var(--color-text); }
+
+        .btn-danger { background: var(--color-danger); color: #fff; border-color: var(--color-danger); }
+        .btn-danger:hover { background: #b22a2a; color: #fff; }
+
+        .btn-warning { background: var(--color-warning); color: #fff; border-color: var(--color-warning); }
+        .btn-warning:hover { background: #b65d06; color: #fff; }
+
+        .btn-sm { padding: 5px 11px; font-size: 12.5px; border-radius: var(--radius-sm); }
+        .btn-block { display: flex; width: 100%; }
+
+        /* ---------- forms ---------- */
+        .form-group { margin-bottom: 14px; }
+        .form-group label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 500; color: var(--color-text); }
+        .form-control {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid var(--color-border-strong);
+            border-radius: var(--radius-md);
+            font-size: 14px;
+            background: var(--color-surface);
+            color: var(--color-text);
+            transition: border-color 0.15s, box-shadow 0.15s;
+            font-family: inherit;
+        }
+        .form-control:focus {
+            outline: 0;
+            border-color: var(--color-text);
+            box-shadow: 0 0 0 3px rgba(13,13,13,0.08);
+        }
+        .form-control::placeholder { color: var(--color-text-muted); }
+        select.form-control { appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='%236e6e80' viewBox='0 0 16 16'%3E%3Cpath d='M3.2 5.8a.8.8 0 011.13 0L8 9.47l3.67-3.67a.8.8 0 111.13 1.13l-4.23 4.24a.8.8 0 01-1.14 0L3.2 6.93a.8.8 0 010-1.13z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat; background-position: right 12px center; background-size: 14px;
+            padding-right: 36px; }
+
+        .form-help { font-size: 12.5px; color: var(--color-text-muted); margin-top: 6px; }
+
+        /* segmented control */
+        .seg {
+            display: inline-flex; gap: 4px; padding: 3px;
+            background: var(--color-surface-soft);
+            border-radius: var(--radius-md);
+            border: 1px solid var(--color-border);
+        }
+        .seg button {
+            background: transparent; border: 0; padding: 6px 12px; border-radius: 6px;
+            font-size: 13px; color: var(--color-text-soft); cursor: pointer;
+            transition: background 0.15s, color 0.15s;
+        }
+        .seg button:hover { color: var(--color-text); }
+        .seg button.active { background: var(--color-surface); color: var(--color-text); box-shadow: var(--shadow-sm); }
+
+        /* ---------- alerts ---------- */
+        .alert {
+            padding: 11px 14px;
+            border-radius: var(--radius-md);
+            margin-bottom: 14px;
+            font-size: 13.5px;
+            border: 1px solid transparent;
+        }
+        .alert-error   { background: var(--color-danger-soft);  color: #8a2222; border-color: #f5b5b5; }
+        .alert-info    { background: var(--color-surface-soft); color: var(--color-text); border-color: var(--color-border); }
+        .alert-success { background: var(--color-surface-soft); color: var(--color-text); border-color: var(--color-border-strong); }
+        .alert-warning { background: var(--color-warning-soft); color: #7c4502; border-color: #f5cd83; }
+
+        /* ---------- badges ---------- */
+        .badge {
+            display: inline-flex; align-items: center; gap: 4px;
+            padding: 2px 9px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 500;
+            line-height: 1.5;
+        }
+        .badge::before {
+            content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: 0.7;
+        }
+        .badge.no-dot::before { display: none; }
+        .badge-success { background: var(--color-surface-soft); color: var(--color-text);      border: 1px solid var(--color-border-strong); }
+        .badge-info    { background: var(--color-surface-soft); color: var(--color-text-soft); border: 1px solid var(--color-border); }
+        .badge-warning { background: var(--color-warning-soft); color: #7c4502;                border: 1px solid #f5cd83; }
+        .badge-danger  { background: var(--color-danger-soft);  color: #8a2222;                border: 1px solid #f5b5b5; }
+        .badge-muted   { background: var(--color-surface-hover); color: var(--color-text-soft); }
+
+        /* ---------- tables ---------- */
+        .table-wrap {
+            background: var(--color-surface);
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius-lg);
+            overflow: hidden;
+        }
+        table { width: 100%; border-collapse: collapse; }
+        thead th {
+            background: var(--color-surface-soft);
+            padding: 11px 16px;
+            text-align: left;
+            color: var(--color-text-soft);
+            font-weight: 500;
+            font-size: 12.5px;
+            border-bottom: 1px solid var(--color-border);
+            white-space: nowrap;
+        }
+        tbody td {
+            padding: 13px 16px;
+            border-bottom: 1px solid var(--color-border);
+            font-size: 13.5px;
+            color: var(--color-text);
+            vertical-align: middle;
+        }
+        tbody tr:hover td { background: var(--color-surface-soft); }
+        tbody tr:last-child td { border-bottom: 0; }
+        .table-empty { text-align: center; padding: 48px 16px; color: var(--color-text-muted); }
+
+        /* ---------- pagination ---------- */
+        .pagination {
+            display: flex; gap: 6px; align-items: center; justify-content: center;
+            margin: 20px 0 4px;
+            font-size: 13px;
+        }
+        .pagination a, .pagination span {
+            padding: 6px 12px; border-radius: var(--radius-sm);
+            color: var(--color-text); background: var(--color-surface);
+            border: 1px solid var(--color-border);
+        }
+        .pagination a:hover { background: var(--color-surface-soft); }
+        .pagination .current { background: var(--color-text); color: #fff; border-color: var(--color-text); }
+        .pagination .muted { color: var(--color-text-muted); background: transparent; border-color: transparent; }
+
+        /* ---------- toolbar ---------- */
+        .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 16px; }
+        .toolbar select, .toolbar input[type="text"], .toolbar input[type="number"] {
+            padding: 9px 12px;
+            border: 1px solid var(--color-border-strong);
+            border-radius: var(--radius-md);
+            font-size: 13.5px;
+            background: var(--color-surface);
+            font-family: inherit;
+        }
+        .toolbar input[type="text"]:focus, .toolbar input[type="number"]:focus, .toolbar select:focus {
+            outline: 0; border-color: var(--color-text);
+            box-shadow: 0 0 0 3px rgba(13,13,13,0.08);
+        }
+        .grow { flex: 1; min-width: 180px; }
+        .nowrap { white-space: nowrap; }
+        .muted { color: var(--color-text-muted); }
+        .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 13px; }
+
+        /* ---------- 点击复制组件（激活码 / 邮箱等可复制项） ---------- */
+        .copy-key {
+            display: inline-flex; align-items: center; gap: 5px;
+            font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+            font-size: 13px;
+            padding: 1px 7px;
+            border-radius: 5px;
+            border: 1px dashed transparent;
+            cursor: pointer;
+            user-select: all;
+            transition: background 0.15s, border-color 0.15s;
+            position: relative;
+        }
+        .copy-key:hover { background: var(--color-surface-soft); border-color: var(--color-border-strong); }
+        .copy-key::after {
+            content: '⧉';
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            font-size: 12px;
+            color: var(--color-text-muted);
+            opacity: 0;
+            transition: opacity 0.15s;
+        }
+        .copy-key:hover::after { opacity: 1; }
+        .copy-key.copied { background: var(--color-surface-soft); border-color: var(--color-text); }
+        .copy-key.copied::after { content: '✓'; opacity: 1; color: var(--color-text); }
+        .copy-toast {
+            position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px);
+            background: var(--color-text); color: #fff;
+            padding: 8px 16px; border-radius: 8px;
+            font-size: 13px;
+            box-shadow: var(--shadow-lg);
+            opacity: 0; pointer-events: none;
+            transition: opacity 0.18s, transform 0.18s;
+            z-index: 1000;
+        }
+        .copy-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+        /* ---------- utilities ---------- */
+        .stack { display: flex; flex-direction: column; gap: 16px; }
+        .row   { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; }
+        .row-between { justify-content: space-between; }
+        .text-right { text-align: right; }
+        .text-center { text-align: center; }
+        h1, h2, h3, h4 { color: var(--color-text); font-weight: 600; }
+
+        {% block extra_style %}{% endblock %}
+    </style>
+</head>
+<body>
+    {% block body %}{% endblock %}
+
+    <div id="copy-toast" class="copy-toast" role="status" aria-live="polite"></div>
+    <script>
+    (function () {
+        var toast = document.getElementById('copy-toast');
+        var toastTimer = null;
+        function showToast(msg) {
+            if (!toast) return;
+            toast.textContent = msg;
+            toast.classList.add('show');
+            if (toastTimer) clearTimeout(toastTimer);
+            toastTimer = setTimeout(function () { toast.classList.remove('show'); }, 1500);
+        }
+        function fallbackCopy(text) {
+            var ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            var ok = false;
+            try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+            document.body.removeChild(ta);
+            return ok;
+        }
+        document.addEventListener('click', function (e) {
+            var el = e.target.closest('.copy-key');
+            if (!el) return;
+            e.preventDefault();
+            var key = el.getAttribute('data-copy') || el.textContent.trim();
+            var done = function () {
+                el.classList.add('copied');
+                setTimeout(function () { el.classList.remove('copied'); }, 1500);
+                showToast('已复制：' + key);
+            };
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(key).then(done).catch(function () {
+                    if (fallbackCopy(key)) done();
+                    else showToast('复制失败，请手动选中');
+                });
+            } else {
+                if (fallbackCopy(key)) done();
+                else showToast('复制失败，请手动选中');
+            }
+        });
+    })();
+    </script>
+</body>
+</html>

@@ -332,30 +332,12 @@
     return null;
   };
 
-  const interceptFileUpload = (url, init) => {
-    try {
-      const body = init?.body;
-      if (!body || !(body instanceof FormData)) return;
-      if (!String(url || '').includes('/files')) return;
-      const fileObjects = [];
-      for (const [, value] of body.entries()) {
-        if (value instanceof File) fileObjects.push(value);
-      }
-      if (!fileObjects.length) return;
-      window.postMessage({ type: 'SAVER_FILE_UPLOADED', files: fileObjects }, '*');
-    } catch {
-      // ignore
-    }
-  };
-
   window.fetch = new Proxy(originalFetch, {
     apply: async function (target, thisArg, args) {
       let conversationRequestId = null;
       const [info, init] = args;
       const url = typeof info === 'string' ? info : info?.url || '';
       const method = String(init?.method || (typeof info === 'object' && info?.method) || 'GET').toUpperCase();
-
-      if (method === 'POST') interceptFileUpload(url, init);
 
       try {
         if (isConversationPost(url, method)) {
@@ -461,22 +443,103 @@
     };
 
     XMLHttpRequest.prototype.send = function (body) {
-      try {
-        if (body instanceof FormData && String(this.__saverUrl || '').includes('/files')) {
-          const files = [];
-          for (const [, value] of body.entries()) {
-            if (value instanceof File) files.push(value);
-          }
-          if (files.length) {
-            window.postMessage({ type: 'SAVER_FILE_UPLOADED', files }, '*');
-          }
-        }
-      } catch {
-        // ignore
-      }
       return origSend.call(this, body);
     };
 
     XMLHttpRequest.prototype.__saverFilePatched = true;
+  }
+
+  function findMessageId(domNode) {
+    let current = domNode;
+    while (current && current !== document.body) {
+      if (typeof current.getAttribute === 'function') {
+        const messageId = current.getAttribute('data-message-id');
+        if (messageId) return messageId;
+      }
+      current = current.parentElement;
+    }
+    return '';
+  }
+
+  function findSandboxPathFromReact(domNode) {
+    try {
+      const fiberKey = Object.keys(domNode || {}).find((key) => key.startsWith('__reactFiber$'));
+      if (!fiberKey) return '';
+      let current = domNode[fiberKey];
+      let depth = 0;
+      while (current && depth < 20) {
+        const props = current.memoizedProps || {};
+        const texts = [
+          typeof props.children === 'string' ? props.children : '',
+          typeof props.node?.value === 'string' ? props.node.value : ''
+        ].filter(Boolean);
+        for (const text of texts) {
+          const match = text.match(/sandbox:(\/mnt\/data\/[^\s)\]]+)/i);
+          if (match && match[1]) return match[1];
+        }
+        current = current.return;
+        depth += 1;
+      }
+    } catch {
+      // ignore
+    }
+    return '';
+  }
+
+  function collectGeneratedFileSnapshot() {
+    const seen = new Set();
+    const candidates = [];
+    const selectors = [
+      '.markdown button.behavior-btn',
+      'span[data-state] button.behavior-btn',
+      '[data-message-author-role="assistant"] a[href*="sandbox:"]',
+      '[data-message-author-role="assistant"] a[download]'
+    ];
+    const diagnostics = {
+      selectors,
+      assistantMessages: document.querySelectorAll('[data-message-author-role="assistant"]').length,
+      scannedNodes: 0,
+      candidateCount: 0,
+      droppedMissingMessageId: 0,
+      droppedMissingSandboxPath: 0
+    };
+    const nodes = document.querySelectorAll(selectors.join(', '));
+    diagnostics.scannedNodes = nodes.length;
+    nodes.forEach((node) => {
+      const label = String(node.textContent || node.innerText || node.getAttribute?.('download') || '').trim();
+      const sandboxPath = findSandboxPathFromReact(node) ||
+        String(node.getAttribute?.('href') || '').replace(/^sandbox:/i, '').trim();
+      const messageId = findMessageId(node);
+      if (!messageId) {
+        diagnostics.droppedMissingMessageId += 1;
+        return;
+      }
+      if (!sandboxPath) {
+        diagnostics.droppedMissingSandboxPath += 1;
+        return;
+      }
+      const fileNameHint = String(sandboxPath.split('/').pop() || label || '').trim();
+      const key = `${messageId}::${sandboxPath}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      candidates.push({ messageId, sandboxPath, fileNameHint });
+    });
+    diagnostics.candidateCount = candidates.length;
+    return { candidates, diagnostics };
+  }
+
+  if (!window.__saverGeneratedFileBridge) {
+    window.addEventListener('message', (event) => {
+      if (event.source !== window || !event.data) return;
+      if (event.data.type !== 'SAVER_REQUEST_GENERATED_FILES') return;
+      const snapshot = collectGeneratedFileSnapshot();
+      window.postMessage({
+        type: 'SAVER_GENERATED_FILES_CANDIDATES',
+        requestId: String(event.data.requestId || ''),
+        candidates: snapshot.candidates,
+        diagnostics: snapshot.diagnostics
+      }, '*');
+    });
+    window.__saverGeneratedFileBridge = true;
   }
 })();

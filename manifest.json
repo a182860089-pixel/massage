@@ -1,12 +1,11 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT 对话保存助手",
-  "version": "1.0.1",
-  "description": "自动保存 ChatGPT 对话，支持导出为 HTML、Markdown、PDF 格式",
+  "version": "2.0.1",
+  "description": "自动保存 ChatGPT 对话并导出为 HTML、Markdown、PDF、JSON，支持附件与上下文保存",
   "permissions": [
     "storage",
     "downloads",
-    "debugger",
     "alarms"
   ],
   "host_permissions": [
@@ -54,6 +53,7 @@
         "src/pdf-v2/workerBridge.js",
         "src/utils/aboutRenderer.js",
         "src/utils/fileSystem.js",
+        "src/utils/conversationAssets.js",
         "src/utils/htmlExporter.js",
         "src/utils/mdExporter.js",
         "src/utils/pdfExporter.js",

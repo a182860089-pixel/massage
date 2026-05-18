@@ -1,0 +1,53 @@
+{% extends "admin/_layout.html" %}
+{% block title %}用户 · cardkey-admin{% endblock %}
+
+{% block content %}
+{% set status_filter = '' %}
+{% set card_type_filter = '' %}
+{% set source_filter = '' %}
+<div class="page-header">
+    <div>
+        <h2>用户</h2>
+        <div class="meta">共 {{ total }} 个邮箱</div>
+    </div>
+</div>
+
+<form method="get" class="toolbar">
+    <input type="text" name="q" class="grow" placeholder="按邮箱搜索" value="{{ q }}">
+    <button class="btn btn-primary" type="submit">搜索</button>
+    {% if q %}
+    <a class="btn btn-ghost" href="{{ url_for('admin.users') }}">清空</a>
+    {% endif %}
+</form>
+
+<div class="table-wrap">
+    <table>
+        <thead>
+            <tr>
+                <th>邮箱</th>
+                <th>绑定激活码数</th>
+                <th>首次加入</th>
+                <th>注册时间</th>
+                <th class="nowrap text-right">操作</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for m in items %}
+        <tr>
+            <td><span class="copy-key" data-copy="{{ m.email }}" title="点击复制">{{ m.email }}</span></td>
+            <td>{{ card_counts.get(m.id, 0) }}</td>
+                <td class="mono">{{ format_china_datetime(m.first_joined_at) if m.first_joined_at else '-' }}</td>
+                <td class="mono">{{ format_china_datetime(m.created_at) }}</td>
+                <td class="nowrap text-right">
+                    <a class="btn btn-sm btn-secondary" href="{{ url_for('admin.user_detail', member_id=m.id) }}">详情</a>
+                </td>
+            </tr>
+            {% else %}
+            <tr><td colspan="5" class="table-empty">还没有任何用户</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+{% include "admin/_pagination.html" %}
+{% endblock %}

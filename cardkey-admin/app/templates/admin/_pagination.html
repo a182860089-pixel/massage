@@ -1,0 +1,21 @@
+{% if page_count and page_count > 1 %}
+{% set _q = q if q is defined else '' %}
+{% set _status = status_filter if status_filter is defined else '' %}
+{% set _ctype = card_type_filter if card_type_filter is defined else '' %}
+{% set _source = source_filter if source_filter is defined else '' %}
+{% set base_qs %}{% if _q %}&q={{ _q|urlencode }}{% endif %}{% if _status %}&status={{ _status|urlencode }}{% endif %}{% if _ctype %}&card_type={{ _ctype|urlencode }}{% endif %}{% if _source %}&source={{ _source|urlencode }}{% endif %}{% endset %}
+<div class="pagination">
+    {% if page > 1 %}
+    <a href="?page={{ page - 1 }}{{ base_qs }}">← 上一页</a>
+    {% else %}
+    <span class="muted">← 上一页</span>
+    {% endif %}
+    <span class="current">第 {{ page }} / {{ page_count }} 页</span>
+    {% if page < page_count %}
+    <a href="?page={{ page + 1 }}{{ base_qs }}">下一页 →</a>
+    {% else %}
+    <span class="muted">下一页 →</span>
+    {% endif %}
+    <span class="muted">共 {{ total }} 条</span>
+</div>
+{% endif %}

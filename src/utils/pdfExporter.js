@@ -26,8 +26,7 @@ const PDFExporter = {
       typeof window.ChatGPTSaver.PDFWorkerBridge.isSupported === 'function' &&
       window.ChatGPTSaver.PDFWorkerBridge.isSupported()
     );
-    const htmlPrintReady = typeof chrome !== 'undefined' && !!chrome.runtime?.sendMessage;
-    return legacyReady || v2Ready || htmlPrintReady;
+    return legacyReady || v2Ready;
   },
   
   /**
@@ -38,8 +37,7 @@ const PDFExporter = {
     const hasBridge = !!window.ChatGPTSaver?.PDFWorkerBridge;
     const workerOk = !!window.ChatGPTSaver?.PDFWorkerBridge?.isSupported?.();
     const legacyReady = typeof html2canvas !== 'undefined' && typeof jspdf !== 'undefined';
-    const htmlPrintReady = typeof chrome !== 'undefined' && !!chrome.runtime?.sendMessage;
-    if (legacyReady || (hasBuilder && hasBridge && workerOk) || htmlPrintReady) return null;
+    if (legacyReady || (hasBuilder && hasBridge && workerOk)) return null;
 
     const reasons = [];
     if (typeof html2canvas === 'undefined') reasons.push('html2canvas 库未加载');
@@ -47,7 +45,6 @@ const PDFExporter = {
     if (!hasBuilder) reasons.push('PDFASTBuilder 未加载');
     if (!hasBridge) reasons.push('PDFWorkerBridge 未加载');
     if (hasBridge && !workerOk) reasons.push('Worker 环境不可用');
-    if (!htmlPrintReady) reasons.push('Background printToPDF 通道不可用');
     return reasons.join(' | ');
   },
 
@@ -136,6 +133,57 @@ const PDFExporter = {
     return conversation.messages.some((msg) =>
       this._containsNonAscii(msg?.textContent || msg?.content || '')
     );
+  },
+
+  _resolveConversation(options = {}) {
+    return options.conversation || window.ChatGPTSaver.Parser.parseConversation();
+  },
+
+  _estimateMessagePages(message = {}) {
+    const text = String(message.textContent || '').trim();
+    const html = String(message.content || '');
+    const textPages = Math.max(1, Math.ceil(text.length / 2600));
+    const codeBlocks = (html.match(/<pre\b/gi) || []).length;
+    const tables = (html.match(/<table\b/gi) || []).length;
+    const images = (html.match(/<(img|canvas|svg)\b/gi) || []).length;
+    return textPages + (codeBlocks * 0.8) + (tables * 0.6) + (images * 1.2);
+  },
+
+  analyzeConversation(conversation) {
+    const safeConversation = conversation || { messages: [] };
+    const messages = Array.isArray(safeConversation.messages) ? safeConversation.messages : [];
+    const totals = messages.reduce((acc, msg) => {
+      const html = String(msg?.content || '');
+      const text = String(msg?.textContent || '');
+      acc.textLength += text.length;
+      acc.imageCount += (html.match(/<(img|canvas|svg)\b/gi) || []).length;
+      acc.codeBlockCount += (html.match(/<pre\b/gi) || []).length;
+      acc.tableCount += (html.match(/<table\b/gi) || []).length;
+      acc.estimatedPages += this._estimateMessagePages(msg);
+      return acc;
+    }, {
+      messageCount: messages.length,
+      textLength: 0,
+      imageCount: 0,
+      codeBlockCount: 0,
+      tableCount: 0,
+      estimatedPages: 0
+    });
+
+    const roundedPages = Math.max(1, Math.ceil(totals.estimatedPages));
+    let risk = 'low';
+    if (roundedPages > 180 || totals.imageCount >= 8 || totals.codeBlockCount >= 20 || totals.textLength > 180000) risk = 'high';
+    else if (roundedPages > 120 || totals.imageCount >= 4 || totals.codeBlockCount >= 10 || totals.textLength > 90000) risk = 'medium';
+
+    return {
+      ...totals,
+      estimatedPages: roundedPages,
+      risk
+    };
+  },
+
+  _shouldSplitPdf(analysis) {
+    return Number(analysis?.estimatedPages || 0) > 180 || String(analysis?.risk || '') === 'high';
   },
 
   _arrayBufferToBinaryString(buffer) {
@@ -835,7 +883,7 @@ const PDFExporter = {
   async exportSegmented(options = {}) {
     if (!this.isAvailable()) return null;
 
-    const conversation = window.ChatGPTSaver.Parser.parseConversation();
+    const conversation = this._resolveConversation(options);
     if (!conversation.messages.length) return null;
     const onProgress = typeof options.onProgress === 'function' ? options.onProgress : () => {};
 
@@ -1096,7 +1144,7 @@ const PDFExporter = {
   async exportStreamed(options = {}) {
     if (!this.isAvailable()) return null;
 
-    const conversation = window.ChatGPTSaver.Parser.parseConversation();
+    const conversation = this._resolveConversation(options);
     if (!conversation.messages.length) return null;
 
     const batchSize = options.batchSize || 3;
@@ -1163,9 +1211,9 @@ const PDFExporter = {
     const bridge = window.ChatGPTSaver.PDFWorkerBridge;
     const onProgress = typeof options.onProgress === 'function' ? options.onProgress : () => {};
 
-    const conversation = parser.parseConversation();
+    const conversation = this._resolveConversation(options);
     if (!conversation.messages.length) return null;
-    const workspace = parser.getWorkspaceName?.() || '';
+    const workspace = options.workspaceName || parser.getWorkspaceName?.() || '';
 
     try {
       const request = await builder.buildConversationAst(conversation, {
@@ -1455,7 +1503,7 @@ const PDFExporter = {
 
   async exportStructured(options = {}) {
     if (!this.isAvailable()) return null;
-    const conversation = window.ChatGPTSaver.Parser.parseConversation();
+    const conversation = this._resolveConversation(options);
     if (!conversation.messages.length) return null;
 
     const onProgress = typeof options.onProgress === 'function' ? options.onProgress : () => {};
@@ -1522,18 +1570,18 @@ const PDFExporter = {
     if (!this.isAvailable()) return null;
     const onProgress = typeof options.onProgress === 'function' ? options.onProgress : () => {};
 
-    const conversation = window.ChatGPTSaver.Parser.parseConversation();
+    const conversation = this._resolveConversation(options);
     if (!conversation.messages.length) return null;
 
     if (conversation.messages.length > 15) {
       try {
-        const result = await this.exportSegmented({ onProgress });
+        const result = await this.exportSegmented({ ...options, conversation, onProgress });
         if (result) return result;
       } catch (e) {
         console.warn('[PDF] 分段渲染失败，回退到流式模式:', e.message);
       }
       try {
-        return await this.exportStreamed({ onProgress });
+        return await this.exportStreamed({ ...options, conversation, onProgress });
       } catch (e) {
         console.error('[PDF] 流式模式也失败:', e);
         return null;
@@ -1556,7 +1604,7 @@ const PDFExporter = {
 
       if (this.isCanvasMostlyBlack(canvas)) {
         console.warn('[PDF] visual 整体 canvas 异常偏黑，自动回退分段模式');
-        return await this.exportSegmented({ onProgress });
+        return await this.exportSegmented({ ...options, conversation, onProgress });
       }
 
       const imgWidth = contentWidth;
@@ -1565,7 +1613,7 @@ const PDFExporter = {
       const pageHeightPx = Math.max(1, Math.floor(contentHeight * pxPerMm));
 
       if (this.detectPageGaps(canvas, pageHeightPx)) {
-        return await this.exportSegmented({ onProgress });
+        return await this.exportSegmented({ ...options, conversation, onProgress });
       }
 
       const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
@@ -1595,12 +1643,113 @@ const PDFExporter = {
     } catch (error) {
       console.error('[PDF] 整体模式失败，尝试流式:', error);
       try {
-        return await this.exportStreamed({ onProgress });
+        return await this.exportStreamed({ ...options, conversation, onProgress });
       } catch (e) {
         console.error('[PDF] 流式也失败:', e);
         return null;
       }
     }
+  },
+
+  _buildSplitConversations(conversation, targetPages = 100) {
+    const messages = Array.isArray(conversation?.messages) ? conversation.messages : [];
+    if (!messages.length) return [];
+    const parts = [];
+    let currentMessages = [];
+    let currentPages = 0;
+    for (const message of messages) {
+      const messagePages = Math.max(1, Math.ceil(this._estimateMessagePages(message)));
+      if (currentMessages.length && currentPages + messagePages > targetPages) {
+        parts.push(currentMessages);
+        currentMessages = [];
+        currentPages = 0;
+      }
+      currentMessages.push(message);
+      currentPages += messagePages;
+    }
+    if (currentMessages.length) parts.push(currentMessages);
+    return parts.map((partMessages, index) => ({
+      title: conversation.title,
+      url: conversation.url,
+      isWorkspace: conversation.isWorkspace,
+      messages: partMessages,
+      partIndex: index
+    }));
+  },
+
+  async exportStructuredParts(options = {}) {
+    const conversation = this._resolveConversation(options);
+    const parts = this._buildSplitConversations(conversation, Number(options.targetPages) || 100);
+    const onProgress = typeof options.onProgress === 'function' ? options.onProgress : () => {};
+    if (!parts.length) return { success: false, parts: [] };
+
+    const renderedParts = [];
+    for (let index = 0; index < parts.length; index++) {
+      const blob = await this.exportStructured({
+        ...options,
+        conversation: parts[index],
+        onProgress: (current, total, detail = null) => {
+          onProgress(current, total, {
+            ...(detail || {}),
+            stage: 'structured-part',
+            part: index + 1,
+            totalParts: parts.length
+          });
+        }
+      });
+      if (!blob) return { success: false, parts: [] };
+      renderedParts.push({
+        nameSuffix: `part${String(index + 1).padStart(2, '0')}`,
+        blob
+      });
+    }
+    return { success: true, parts: renderedParts };
+  },
+
+  async exportPackage(optionsOrProgress) {
+    let options = {};
+    if (typeof optionsOrProgress === 'function') options = { onProgress: optionsOrProgress };
+    else if (optionsOrProgress && typeof optionsOrProgress === 'object') options = optionsOrProgress;
+
+    const conversation = this._resolveConversation(options);
+    if (!conversation?.messages?.length) return { success: false, error: 'no_messages', analysis: this.analyzeConversation(conversation) };
+
+    const analysis = this.analyzeConversation(conversation);
+    const rawMode = String(options.mode || '').toLowerCase();
+    const mode = rawMode === 'visual' ? 'visual' : (rawMode === 'structured' ? 'structured' : 'structured_auto');
+    const shouldSplit = this._shouldSplitPdf(analysis);
+
+    if (mode === 'visual' && !shouldSplit) {
+      const blob = await this.exportVisual({ ...options, conversation });
+      if (blob) return { success: true, blob, split: false, analysis, warnings: [] };
+    }
+
+    if (shouldSplit) {
+      const splitResult = await this.exportStructuredParts({ ...options, conversation, targetPages: 100 });
+      if (splitResult.success) {
+        return {
+          success: true,
+          parts: splitResult.parts,
+          split: true,
+          analysis,
+          warnings: ['pdf_split']
+        };
+      }
+    }
+
+    const structuredV2 = await this.exportStructuredV2({ ...options, conversation });
+    if (structuredV2) return { success: true, blob: structuredV2, split: false, analysis, warnings: [] };
+
+    const structured = await this.exportStructured({ ...options, conversation });
+    if (structured) return { success: true, blob: structured, split: false, analysis, warnings: [] };
+
+    if (shouldSplit) {
+      return { success: false, error: 'large_conversation_pdf_failed', analysis, warnings: ['split_failed'] };
+    }
+
+    const visual = await this.exportVisual({ ...options, conversation });
+    if (visual) return { success: true, blob: visual, split: false, analysis, warnings: ['visual_fallback'] };
+    return { success: false, error: 'pdf_export_failed', analysis, warnings: [] };
   },
 
   /**
@@ -1609,34 +1758,11 @@ const PDFExporter = {
    * 新签名: exportWithFallback({ mode, onProgress })
    */
   async exportWithFallback(optionsOrProgress) {
-    let options = {};
-    if (typeof optionsOrProgress === 'function') {
-      options = { onProgress: optionsOrProgress };
-    } else if (optionsOrProgress && typeof optionsOrProgress === 'object') {
-      options = optionsOrProgress;
-    }
-
-    const rawMode = String(options.mode || '').toLowerCase();
-    const mode = rawMode === 'visual'
-      ? 'visual'
-      : (rawMode === 'html_print' ? 'html_print' : 'structured');
-
-    if (mode === 'visual') {
-      return this.exportVisual(options);
-    }
-    if (mode === 'html_print') {
-      const htmlPrint = await this.exportHtmlPrint(options);
-      if (htmlPrint) return htmlPrint;
-      console.warn('[PDF] html_print 模式失败，已自动回退 structured 模式');
-    }
-
-    const structuredV2 = await this.exportStructuredV2(options);
-    if (structuredV2) return structuredV2;
-
-    const structured = await this.exportStructured(options);
-    if (structured) return structured;
-    console.warn('[PDF] structured 模式不可用或失败，已自动回退 visual 模式');
-    return this.exportVisual(options);
+    const result = await this.exportPackage(optionsOrProgress);
+    if (!result?.success) return null;
+    if (result.blob) return result.blob;
+    if (Array.isArray(result.parts) && result.parts[0]?.blob) return result.parts[0].blob;
+    return null;
   }
 };
 

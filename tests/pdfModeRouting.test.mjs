@@ -23,46 +23,56 @@ function loadPDFExporter() {
 }
 
 describe('PDF mode routing', () => {
-  it('prefers html_print when mode is html_print', async () => {
+  const smallConversation = {
+    title: 'Small',
+    messages: [{ role: 'user', content: '<p>Hello</p>', textContent: 'Hello' }]
+  };
+
+  it('uses structured chain for structured_auto mode', async () => {
     const exporter = loadPDFExporter();
     const calls = [];
 
-    exporter.exportHtmlPrint = async () => { calls.push('html'); return 'html-result'; };
-    exporter.exportStructuredV2 = async () => { calls.push('v2'); return 'v2-result'; };
-    exporter.exportStructured = async () => { calls.push('structured'); return 'structured-result'; };
-    exporter.exportVisual = async () => { calls.push('visual'); return 'visual-result'; };
-
-    const result = await exporter.exportWithFallback({ mode: 'html_print' });
-    expect(result).toBe('html-result');
-    expect(calls).toEqual(['html']);
-  });
-
-  it('falls back to structured chain when html_print fails', async () => {
-    const exporter = loadPDFExporter();
-    const calls = [];
-
-    exporter.exportHtmlPrint = async () => { calls.push('html'); return null; };
     exporter.exportStructuredV2 = async () => { calls.push('v2'); return null; };
     exporter.exportStructured = async () => { calls.push('structured'); return 'structured-result'; };
     exporter.exportVisual = async () => { calls.push('visual'); return 'visual-result'; };
 
-    const result = await exporter.exportWithFallback({ mode: 'html_print' });
+    const result = await exporter.exportWithFallback({ mode: 'structured_auto', conversation: smallConversation });
     expect(result).toBe('structured-result');
-    expect(calls).toEqual(['html', 'v2', 'structured']);
+    expect(calls).toEqual(['v2', 'structured']);
   });
 
-  it('uses visual directly when mode is visual', async () => {
+  it('uses visual directly when visual mode is explicitly requested for small conversations', async () => {
     const exporter = loadPDFExporter();
     const calls = [];
 
-    exporter.exportHtmlPrint = async () => { calls.push('html'); return 'html-result'; };
+    exporter.analyzeConversation = () => ({ estimatedPages: 12, risk: 'low' });
+    exporter.exportVisual = async () => { calls.push('visual'); return 'visual-result'; };
     exporter.exportStructuredV2 = async () => { calls.push('v2'); return 'v2-result'; };
     exporter.exportStructured = async () => { calls.push('structured'); return 'structured-result'; };
-    exporter.exportVisual = async () => { calls.push('visual'); return 'visual-result'; };
 
-    const result = await exporter.exportWithFallback({ mode: 'visual' });
+    const result = await exporter.exportWithFallback({ mode: 'visual', conversation: smallConversation });
     expect(result).toBe('visual-result');
     expect(calls).toEqual(['visual']);
   });
-});
 
+  it('splits large conversations before returning PDF package', async () => {
+    const exporter = loadPDFExporter();
+    exporter.analyzeConversation = () => ({ estimatedPages: 220, risk: 'high' });
+    exporter.exportStructuredParts = async () => ({
+      success: true,
+      parts: [{ nameSuffix: 'part01', blob: 'blob-a' }, { nameSuffix: 'part02', blob: 'blob-b' }]
+    });
+
+    const result = await exporter.exportPackage({
+      mode: 'structured_auto',
+      conversation: {
+        title: 'Large',
+        messages: [{ role: 'assistant', content: '<p>x</p>', textContent: 'x' }]
+      }
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.split).toBe(true);
+    expect(result.parts).toHaveLength(2);
+  });
+});

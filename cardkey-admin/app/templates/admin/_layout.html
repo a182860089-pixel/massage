@@ -1,0 +1,149 @@
+{% extends "_layout.html" %}
+
+{# admin 公共样式：所有 admin 子页面（cards / user_detail 等）的 extra_style 必须 {{ super() }} 把这一段保留下来 #}
+{% block extra_style %}
+.shell { display: grid; grid-template-columns: 248px 1fr; min-height: 100vh; background: var(--color-bg); }
+
+.sidebar {
+    background: var(--color-surface-soft);
+    border-right: 1px solid var(--color-border);
+    padding: 18px 14px;
+    display: flex; flex-direction: column;
+}
+.brand {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 10px 16px;
+    border-bottom: 1px solid var(--color-border);
+    margin-bottom: 12px;
+}
+.brand .logo {
+    width: 30px; height: 30px; border-radius: 8px;
+    background: var(--color-text); color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 700;
+}
+.brand .title { font-size: 14px; font-weight: 600; }
+.brand .subtitle { font-size: 11.5px; color: var(--color-text-muted); }
+
+.nav { display: flex; flex-direction: column; gap: 2px; }
+.nav a {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 12px;
+    border-radius: var(--radius-md);
+    color: var(--color-text-soft);
+    font-size: 13.5px;
+}
+.nav a .icon { width: 16px; height: 16px; opacity: 0.85; }
+.nav a:hover { background: var(--color-surface-hover); color: var(--color-text); text-decoration: none; }
+.nav a.active { background: var(--color-text); color: #fff; }
+.nav a.active .icon { opacity: 1; color: #fff; }
+
+.sidebar-footer {
+    margin-top: auto;
+    padding: 12px 10px;
+    border-top: 1px solid var(--color-border);
+}
+.sidebar-footer .who { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.sidebar-footer .who .avatar {
+    width: 28px; height: 28px; border-radius: 50%;
+    background: var(--color-text); color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 600; font-size: 12px;
+}
+.sidebar-footer .who .meta .name { font-size: 13px; font-weight: 500; }
+.sidebar-footer .who .meta .role { font-size: 11.5px; color: var(--color-text-muted); }
+.sidebar-footer .logout {
+    display: block; margin-top: 8px; font-size: 12px;
+    color: var(--color-text-muted);
+}
+.sidebar-footer .logout:hover { color: var(--color-danger); }
+
+.content {
+    padding: 28px 32px;
+    overflow-x: hidden;
+    min-width: 0;
+}
+.page-header {
+    display: flex; justify-content: space-between; align-items: flex-end;
+    flex-wrap: wrap; gap: 12px;
+    margin-bottom: 22px;
+}
+.page-header h2 { font-size: 22px; letter-spacing: -0.015em; }
+.page-header .meta { color: var(--color-text-muted); font-size: 13px; margin-top: 4px; }
+
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 20px; }
+.stat-card {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: 18px 20px;
+}
+.stat-card .lbl { color: var(--color-text-soft); font-size: 12.5px; margin-bottom: 8px; }
+.stat-card .val { font-size: 24px; font-weight: 700; color: var(--color-text); letter-spacing: -0.02em; }
+.stat-card .val.success { color: var(--color-text); }
+.stat-card .val.warning { color: var(--color-warning); }
+.stat-card .val.danger  { color: var(--color-danger); }
+.stat-card .val.info    { color: var(--color-text-soft); }
+
+.flash-wrap { margin-bottom: 14px; }
+
+.section { margin-bottom: 22px; }
+.section h3 { font-size: 15px; margin-bottom: 10px; }
+
+@media (max-width: 900px) {
+    .shell { grid-template-columns: 1fr; }
+    .sidebar { display: none; }
+    .content { padding: 20px; }
+}
+{% endblock %}
+
+{% block body %}
+<div class="shell">
+    <aside class="sidebar">
+        <div class="brand">
+            <div class="logo">CK</div>
+            <div>
+                <div class="title">cardkey-admin</div>
+                <div class="subtitle">激活码管理</div>
+            </div>
+        </div>
+
+        <nav class="nav">
+            <a href="{{ url_for('admin.dashboard') }}"
+               class="{{ 'active' if request.endpoint == 'admin.dashboard' else '' }}">仪表盘</a>
+            <a href="{{ url_for('admin.cards') }}"
+               class="{{ 'active' if request.endpoint and request.endpoint.startswith('admin.cards') else '' }}">激活码</a>
+            <a href="{{ url_for('admin.users') }}"
+               class="{{ 'active' if request.endpoint and (request.endpoint == 'admin.users' or request.endpoint == 'admin.user_detail') else '' }}">用户</a>
+            <a href="{{ url_for('admin.activations') }}"
+               class="{{ 'active' if request.endpoint == 'admin.activations' else '' }}">激活记录</a>
+            <a href="{{ url_for('web.index') }}" target="_blank" rel="noopener">用户激活页 ↗</a>
+        </nav>
+
+        <div class="sidebar-footer">
+            {% if admin %}
+            <div class="who">
+                <div class="avatar">{{ admin.username[0]|upper }}</div>
+                <div class="meta">
+                    <div class="name">{{ admin.username }}</div>
+                    <div class="role">{% if admin.is_super %}超级管理员{% else %}管理员{% endif %}</div>
+                </div>
+            </div>
+            <a class="logout" href="{{ url_for('admin.logout') }}">退出登录</a>
+            {% endif %}
+        </div>
+    </aside>
+
+    <main class="content">
+        <div class="flash-wrap">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% for category, msg in messages %}
+                    <div class="alert alert-{{ category if category in ['error','info','success','warning'] else 'info' }}">{{ msg }}</div>
+                {% endfor %}
+            {% endwith %}
+        </div>
+
+        {% block content %}{% endblock %}
+    </main>
+</div>
+{% endblock %}

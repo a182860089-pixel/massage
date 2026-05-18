@@ -61,13 +61,32 @@ const AccessManager = {
     await this._saveMode();
   },
 
+  /**
+   * 注意：本方法**永远返回 true**，因为本插件设计上允许免费模式继续使用，
+   * 只是受 FeatureQuotaManager 配额约束。这个方法的真正作用是顺带同步当前 mode。
+   *
+   * 如果调用方想做"是否付费版"的硬阻断，请改用 isCardActive() 或 getAccessMode()==='card'。
+   * 保留 canUseNow 的签名是为了兼容历史调用点。
+   */
   canUseNow() {
+    this._syncAccessModeFromCardKey();
+    return true;
+  },
+
+  /**
+   * 仅做模式同步，不返回布尔。给只关心"刷新一下 badge"的场景用。
+   */
+  syncAccessMode() {
+    this._syncAccessModeFromCardKey();
+    return this._state.accessMode;
+  },
+
+  _syncAccessModeFromCardKey() {
     if (this._cardKeyManager?.canUseNow?.()) {
       this._state.accessMode = 'card';
     } else {
       this._state.accessMode = 'free';
     }
-    return true;
   },
 
   getUnavailableMessage() {

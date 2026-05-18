@@ -83,4 +83,10 @@ describe('HTMLExporter', () => {
     expect(sanitized).toContain('target="_blank"');
     expect(sanitized).toContain('rel="noopener noreferrer"');
   });
+
+  it('removes dangerous javascript links', () => {
+    const sanitized = HTMLExporter.sanitizeMessageHtml('<a href="javascript:alert(1)">bad</a><a href="https://example.com">ok</a>');
+    expect(sanitized).not.toContain('javascript:alert');
+    expect(sanitized).toContain('href="https://example.com/"');
+  });
 });

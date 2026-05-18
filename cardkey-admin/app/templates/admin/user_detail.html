@@ -1,0 +1,150 @@
+{% extends "admin/_layout.html" %}
+{% block title %}{{ member.email }} · 用户详情{% endblock %}
+
+{% block extra_style %}
+{{ super() }}
+.section { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-lg); padding: 22px 24px; margin-bottom: 16px; }
+.section h3 { font-size: 15px; margin-bottom: 14px; }
+.section .table-wrap { border: 0; border-radius: 0; }
+.section table thead th { background: var(--color-surface-soft); }
+.profile-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+.kv { background: var(--color-surface-soft); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: 12px 14px; }
+.kv .lbl { font-size: 12px; color: var(--color-text-muted); margin-bottom: 4px; }
+.kv .val { font-size: 14px; font-weight: 500; color: var(--color-text); word-break: break-all; }
+{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <div>
+        <h2>{{ member.email }}</h2>
+        <div class="meta">用户详情 · 注册于 {{ format_china_datetime(member.created_at) }}</div>
+    </div>
+    <a class="btn btn-secondary" href="{{ url_for('admin.users') }}">← 返回用户列表</a>
+</div>
+
+<div class="section">
+    <h3>基础信息</h3>
+    <div class="profile-grid">
+        <div class="kv"><div class="lbl">用户邮箱</div><div class="val"><span class="copy-key" data-copy="{{ member.email }}" title="点击复制">{{ member.email }}</span></div></div>
+        <div class="kv"><div class="lbl">绑定激活码数</div><div class="val">{{ cards|length }}</div></div>
+        <div class="kv"><div class="lbl">设备绑定数</div><div class="val">{{ bindings|length }}</div></div>
+        <div class="kv"><div class="lbl">首次加入</div><div class="val mono">{{ format_china_datetime(member.first_joined_at) if member.first_joined_at else '-' }}</div></div>
+    </div>
+</div>
+
+<div class="section">
+    <h3>绑定的激活码</h3>
+    {% if cards %}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>激活码</th>
+                    <th>类型</th>
+                    <th>状态</th>
+                    <th>有效期</th>
+                    <th>剩余</th>
+                    <th>过期时间</th>
+                    <th>绑定时间</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for c in cards %}
+                {% set rd = remaining_days(c.expires_at) %}
+                <tr>
+                    <td><span class="copy-key" data-copy="{{ c.key }}" title="点击复制">{{ c.key }}</span></td>
+                    <td>{{ card_type_label(c.card_type) }}</td>
+                    <td>
+                        {% if c.status == 'active' %}<span class="badge badge-success">已激活</span>
+                        {% elif c.status == 'expired' %}<span class="badge badge-warning">已过期</span>
+                        {% elif c.status == 'disabled' %}<span class="badge badge-danger">已禁用</span>
+                        {% else %}<span class="badge badge-muted">{{ card_status_label(c.status) }}</span>{% endif %}
+                    </td>
+                    <td>{{ c.validity_days }} 天</td>
+                    <td>
+                        {% if rd is none %}<span class="muted">-</span>
+                        {% elif rd == 0 %}<span class="badge badge-warning no-dot">已过期</span>
+                        {% else %}{{ rd }} 天{% endif %}
+                    </td>
+                    <td class="mono">{{ format_china_datetime(c.expires_at) if c.expires_at else '-' }}</td>
+                    <td class="mono">{{ format_china_datetime(c.bound_at) if c.bound_at else '-' }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p class="muted">该用户尚未绑定激活码。</p>
+    {% endif %}
+</div>
+
+<div class="section">
+    <h3>插件设备绑定</h3>
+    {% if bindings %}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>设备 ID</th>
+                    <th>状态</th>
+                    <th>激活时间</th>
+                    <th>最近活跃</th>
+                    <th>换绑次数</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for b in bindings %}
+                <tr>
+                    <td class="mono">{{ (b.client_id[:14] + '…') if b.client_id and b.client_id|length > 14 else b.client_id }}</td>
+                    <td>
+                        {% if b.status == 'active' %}<span class="badge badge-success">活动</span>
+                        {% else %}<span class="badge badge-muted">{{ b.status }}</span>{% endif %}
+                    </td>
+                    <td class="mono">{{ format_china_datetime(b.activated_at) }}</td>
+                    <td class="mono">{{ format_china_datetime(b.last_seen_at) }}</td>
+                    <td>{{ b.rebind_count }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p class="muted">该用户尚未在插件中激活。</p>
+    {% endif %}
+</div>
+
+<div class="section">
+    <h3>最近 20 条激活记录</h3>
+    {% if recent_activations %}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>时间</th>
+                    <th>激活码</th>
+                    <th>来源</th>
+                    <th>状态</th>
+                    <th>说明</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in recent_activations %}
+                <tr>
+                    <td class="mono">{{ format_china_datetime(r.created_at) }}</td>
+                    <td>{% if r.card_key %}<span class="copy-key" data-copy="{{ r.card_key }}" title="点击复制">{{ r.card_key }}</span>{% else %}-{% endif %}</td>
+                    <td><span class="badge badge-muted">{{ r.source }}</span></td>
+                    <td>
+                        {% if r.status == 'succeeded' %}<span class="badge badge-success">{{ r.reason_code or 'ok' }}</span>
+                        {% else %}<span class="badge badge-danger">{{ r.reason_code or '失败' }}</span>{% endif %}
+                    </td>
+                    <td>{{ r.message or '-' }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p class="muted">还没有激活记录。</p>
+    {% endif %}
+</div>
+{% endblock %}

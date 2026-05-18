@@ -88,6 +88,26 @@ const Exporter = {
       assetsDigest: assetSnapshot?.assetsDigest || ''
     };
 
+    // 跨平台 fallback：如果当前是 Gemini 等非 ChatGPT 域且通过 PlatformAdapterRegistry
+    // 解析到 adapter，则用 adapter 的规范模型替换 conversation（向 ChatGPT 行为完全兼容
+    // 因为 ChatGPTAdapter.parseConversationModel 内部仍然走旧 parser）。
+    try {
+      const reg = window.ChatGPTSaver?.PlatformAdapterRegistry;
+      const Model = window.ChatGPTSaver?.ConversationModel;
+      const adapter = reg?.resolveForUrl ? reg.resolveForUrl(typeof window !== 'undefined' ? window.location.href : '') : null;
+      if (adapter && Model) {
+        const model = adapter.parseConversationModel();
+        const legacy = model ? Model.modelToLegacyConversation(model) : null;
+        if (legacy && Array.isArray(legacy.messages) && legacy.messages.length) {
+          conversation.title = legacy.title || conversation.title;
+          conversation.messages = legacy.messages;
+          conversation.url = legacy.url || conversation.url;
+        }
+      }
+    } catch (e) {
+      this.log('⚠️ adapter fallback 失败: ' + (e?.message || e));
+    }
+
     this.log(`📝 开始导出对话: ${title}`);
     this.log(`📁 工作空间: ${workspaceName || '无'}`);
     this.log(`💬 当前消息数: ${conversation.messages.length}`);

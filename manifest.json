@@ -13,6 +13,7 @@
   "host_permissions": [
     "https://chat.openai.com/*",
     "https://chatgpt.com/*",
+    "https://gemini.google.com/*",
     "https://seat.20050225.xyz/api/plugin/card-keys/*"
   ],
   "action": {
@@ -41,7 +42,8 @@
     {
       "matches": [
         "https://chat.openai.com/*",
-        "https://chatgpt.com/*"
+        "https://chatgpt.com/*",
+        "https://gemini.google.com/*"
       ],
       "js": [
         "src/lib/turndown.min.js",
@@ -71,9 +73,13 @@
         "src/core/commandBus.js",
         "src/core/clipboard.js",
         "src/core/exporter.js",
+        "src/core/batchExporter.js",
         "src/adapters/_base.js",
         "src/adapters/chatgpt/parser.js",
+        "src/adapters/chatgpt/apiSource.js",
         "src/adapters/chatgpt/index.js",
+        "src/adapters/gemini/parser.js",
+        "src/adapters/gemini/index.js",
         "src/content/parser.js",
         "src/content/observer.js",
         "src/content/content.js"
@@ -95,6 +101,14 @@
         "dist/pdfRender.worker.js"
       ],
       "matches": ["https://chat.openai.com/*", "https://chatgpt.com/*"]
+    },
+    {
+      "resources": [
+        "src/popup/batch.html",
+        "src/popup/batch.css",
+        "src/popup/batch.js"
+      ],
+      "matches": ["<all_urls>"]
     }
   ],
   "commands": {

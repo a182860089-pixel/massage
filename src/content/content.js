@@ -3916,6 +3916,73 @@
             }
           }
           break;
+        case 'batchListConversations':
+          {
+            try {
+              const api = window.ChatGPTSaver?.ChatGPTApiSource;
+              if (!api) {
+                sendResponse({ success: false, error: 'api_source_unavailable' });
+                break;
+              }
+              const list = await api.listAllArray({
+                pageSize: 100,
+                order: 'updated',
+                maxItems: request.maxItems || 2000
+              });
+              sendResponse({ success: true, list });
+            } catch (err) {
+              sendResponse({ success: false, error: err?.message || String(err) });
+            }
+          }
+          break;
+        case 'batchStart':
+          {
+            try {
+              const be = window.ChatGPTSaver?.BatchExporter;
+              if (!be) {
+                sendResponse({ success: false, error: 'batch_exporter_unavailable' });
+                break;
+              }
+              // 异步运行（不阻塞 sendResponse），让 batch 页面靠 batchGetProgress 轮询
+              be.start({
+                platform: 'chatgpt',
+                conversations: request.conversations || [],
+                formats: request.formats,
+                concurrency: request.concurrency,
+                retry: request.retry,
+                pdfMode: request.pdfMode
+              }).then((summary) => {
+                console.log('[BatchExporter] finished:', summary);
+              }).catch((err) => {
+                console.warn('[BatchExporter] failed:', err);
+              });
+              sendResponse({ success: true, started: true });
+            } catch (err) {
+              sendResponse({ success: false, error: err?.message || String(err) });
+            }
+          }
+          break;
+        case 'batchAbort':
+          {
+            const be = window.ChatGPTSaver?.BatchExporter;
+            if (!be) {
+              sendResponse({ success: false, error: 'batch_exporter_unavailable' });
+              break;
+            }
+            sendResponse(be.abort());
+          }
+          break;
+        case 'batchGetProgress':
+          {
+            const be = window.ChatGPTSaver?.BatchExporter;
+            if (!be) {
+              sendResponse({ success: false, error: 'batch_exporter_unavailable' });
+              break;
+            }
+            const state = await be.getProgress();
+            sendResponse({ success: true, state });
+          }
+          break;
         default:
           sendResponse({ error: '未知操作' });
       }

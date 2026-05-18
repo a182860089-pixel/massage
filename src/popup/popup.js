@@ -73,7 +73,9 @@ function showToast(message, type = 'success') {
 
 async function getActiveChatGPTTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab || (!String(tab.url || '').includes('chat.openai.com') && !String(tab.url || '').includes('chatgpt.com'))) {
+  const url = String(tab?.url || '');
+  const ok = url.includes('chat.openai.com') || url.includes('chatgpt.com') || url.includes('gemini.google.com');
+  if (!tab || !ok) {
     return null;
   }
   return tab;
@@ -242,9 +244,20 @@ exportNowBtn.addEventListener('click', async () => {
   }
 });
 
-// 复制按钮
+// 复制按钮 + 批量导出按钮
 const copyMdBtn = document.getElementById('copy-md-btn');
 const copyRichBtn = document.getElementById('copy-rich-btn');
+const batchExportBtn = document.getElementById('batch-export-btn');
+
+if (batchExportBtn) {
+  batchExportBtn.addEventListener('click', async () => {
+    try {
+      await chrome.tabs.create({ url: chrome.runtime.getURL('src/popup/batch.html') });
+    } catch (e) {
+      showToast('打开批量导出页失败', 'error');
+    }
+  });
+}
 
 async function runCommandInActiveTab(commandId) {
   const tab = await getActiveChatGPTTab();

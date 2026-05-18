@@ -83,7 +83,8 @@ chrome.runtime.onInstalled.addListener((details) => {
 // 右键菜单注册
 const CONTEXT_MENU_DOCUMENT_URL_PATTERNS = [
   'https://chat.openai.com/*',
-  'https://chatgpt.com/*'
+  'https://chatgpt.com/*',
+  'https://gemini.google.com/*'
 ];
 
 async function ensureContextMenus() {
@@ -121,7 +122,7 @@ async function ensureContextMenus() {
 
 // 右键菜单 → 转发到 content
 chrome.contextMenus?.onClicked?.addListener(async (info, tab) => {
-  if (!tab?.id || !isChatGPTUrl(tab.url)) return;
+  if (!tab?.id || !isSaverSupportedUrl(tab.url)) return;
   const map = {
     saver_save_now: { commandId: 'export.current', args: { source: 'context_menu' } },
     saver_copy_markdown: { commandId: 'copy.markdown', args: { source: 'context_menu' } },
@@ -156,7 +157,7 @@ chrome.commands?.onCommand?.addListener(async (commandName) => {
   if (!target) return;
   try {
     const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!activeTab?.id || !isChatGPTUrl(activeTab.url)) return;
+    if (!activeTab?.id || !isSaverSupportedUrl(activeTab.url)) return;
     if (target === '__open_panel__') {
       await chrome.tabs.sendMessage(activeTab.id, { action: 'togglePanel' });
     } else {
@@ -191,9 +192,13 @@ function isChatGPTUrl(url) {
   );
 }
 
+function isSaverSupportedUrl(url) {
+  return isChatGPTUrl(url) || (typeof url === 'string' && url.includes('gemini.google.com'));
+}
+
 // 点击扩展图标：切换侧边栏显示/隐藏
 chrome.action.onClicked.addListener(async (tab) => {
-  if (!tab?.id || !isChatGPTUrl(tab.url)) return;
+  if (!tab?.id || !isSaverSupportedUrl(tab.url)) return;
   try {
     await chrome.tabs.sendMessage(tab.id, { action: 'togglePanel' });
   } catch (error) {

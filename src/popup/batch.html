@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>批量导出 - ChatGPT 对话保存助手</title>
+  <link rel="stylesheet" href="batch.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">CK</div>
+      <div>
+        <div class="title">批量导出</div>
+        <div class="subtitle">ChatGPT 对话保存助手 v2.2.0</div>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <a href="#" id="open-chatgpt" class="btn btn-ghost btn-sm">打开 ChatGPT</a>
+    </div>
+  </header>
+
+  <main class="main">
+    <section class="panel">
+      <h2>1. 选择要导出的对话</h2>
+      <div class="row">
+        <button id="btn-load-list" class="btn btn-primary">📥 加载我的全部对话</button>
+        <span id="list-status" class="muted">未加载</span>
+      </div>
+      <div class="toolbar">
+        <input type="text" id="filter-input" placeholder="按标题筛选…" />
+        <label class="select-all"><input type="checkbox" id="select-all"> 全选</label>
+        <span id="select-count" class="muted">0 / 0 选中</span>
+      </div>
+      <div class="list-wrap">
+        <table class="conv-list">
+          <thead>
+            <tr><th style="width:32px"></th><th>标题</th><th style="width:160px">更新时间</th></tr>
+          </thead>
+          <tbody id="conv-tbody">
+            <tr><td colspan="3" class="empty">点上方「加载我的全部对话」开始</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>2. 选择导出格式</h2>
+      <div class="row gap-large">
+        <label class="format-chip"><input type="checkbox" id="fmt-html" checked> HTML</label>
+        <label class="format-chip"><input type="checkbox" id="fmt-md" checked> Markdown</label>
+        <label class="format-chip"><input type="checkbox" id="fmt-json" checked> JSON</label>
+        <label class="format-chip"><input type="checkbox" id="fmt-pdf"> PDF</label>
+        <span class="muted" style="flex:1; text-align:right;">PDF 会显著降低速度，默认不勾</span>
+      </div>
+      <div class="row gap-large mt-12">
+        <label>并发数 <input type="number" id="concurrency" value="3" min="1" max="8" style="width:60px"></label>
+        <label>单条重试 <input type="number" id="retry" value="3" min="0" max="6" style="width:60px"></label>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>3. 运行</h2>
+      <div class="row">
+        <button id="btn-start" class="btn btn-accent" disabled>🚀 开始批量导出</button>
+        <button id="btn-abort" class="btn btn-danger" disabled>⏹ 停止</button>
+        <span id="run-summary" class="muted">未开始</span>
+      </div>
+      <div class="progress-bar">
+        <div id="progress-fill" class="progress-fill" style="width: 0%"></div>
+      </div>
+      <div class="result-grid">
+        <div class="result-tile"><div class="lbl">已成功</div><div class="val good" id="stat-success">0</div></div>
+        <div class="result-tile"><div class="lbl">已跳过</div><div class="val" id="stat-skipped">0</div></div>
+        <div class="result-tile"><div class="lbl">失败</div><div class="val bad" id="stat-failed">0</div></div>
+        <div class="result-tile"><div class="lbl">剩余</div><div class="val" id="stat-pending">0</div></div>
+      </div>
+      <div class="logs">
+        <div class="logs-head">运行日志</div>
+        <div id="logs-body" class="logs-body"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="batch.js"></script>
+</body>
+</html>
